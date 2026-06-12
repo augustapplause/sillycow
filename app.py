@@ -427,14 +427,158 @@ def near_term_bias_model(clv_5, volume_ratio, hvn_distance_pct, supply, institut
     }
 
 
+
+def mean_reversion_model(price, nearest_hvn, atr_now, clv_5, clv_10, hvn_distance_pct):
+    """Range-bound engine using only three inputs:
+    1) HVN distance, 2) ATR-normalized stretch, 3) CLV exhaustion.
+    """
+    if nearest_hvn is None or atr_now <= 0:
+        return {
+            "value": "UNAVAILABLE",
+            "status": "UNAVAILABLE",
+            "direction": "UNCONFIRMED",
+            "score": "0/3",
+            "days": "",
+            "price_impact": "=",
+            "reason": "Not enough HVN/ATR data for mean reversion engine.",
+            "stretch_atr": 0.0,
+            "hvn_distance_pct": 0.0,
+            "score_items": {}
+        }
+
+    distance = price - nearest_hvn
+    stretch_atr = distance / (atr_now + 1e-9)
+    abs_stretch_atr = abs(stretch_atr)
+    abs_hvn_distance_pct = abs(hvn_distance_pct)
+
+    above_hvn = distance > 0
+    below_hvn = distance < 0
+
+    hvn_distance_signal = abs_hvn_distance_pct >= 2.0
+    atr_stretch_signal = abs_stretch_atr >= 1.25
+
+    # Exhaustion is deliberately directional and simple.
+    # Above HVN: upside is tiring if CLV is deteriorating or no longer positive.
+    # Below HVN: downside is tiring if CLV is improving or no longer negative.
+    if above_hvn:
+        clv_exhaustion = (clv_5 < clv_10) or (clv_5 < 0.10)
+        direction = "DOWNSIDE_REVERSION" if clv_exhaustion else "UNCONFIRMED"
+    elif below_hvn:
+        clv_exhaustion = (clv_5 > clv_10) or (clv_5 > -0.10)
+        direction = "UPSIDE_REVERSION" if clv_exhaustion else "UNCONFIRMED"
+    else:
+        clv_exhaustion = False
+        direction = "UNCONFIRMED"
+
+    score_items = {
+        "HVN distance": hvn_distance_signal,
+        "ATR stretch": atr_stretch_signal,
+        "CLV exhaustion": clv_exhaustion,
+    }
+
+    score_num = sum(score_items.values())
+
+    if score_num == 3:
+        status = "HIGH"
+    elif score_num == 2:
+        status = "ELEVATED"
+    elif score_num == 1:
+        status = "WATCH"
+    else:
+        status = "LOW"
+
+    if direction == "UPSIDE_REVERSION" and status in ["ELEVATED", "HIGH"]:
+        impact = "+"
+    elif direction == "DOWNSIDE_REVERSION" and status in ["ELEVATED", "HIGH"]:
+        impact = "-"
+    else:
+        impact = "="
+
+    passed = [k for k, v in score_items.items() if v]
+    missing = [k for k, v in score_items.items() if not v]
+
+    reason = (
+        f"Stretch {stretch_atr:+.1f} ATR from HVN; "
+        f"passed: {', '.join(passed) if passed else 'none'}; "
+        f"missing: {', '.join(missing) if missing else 'none'}."
+    )
+
+    return {
+        "value": f"{status} / {direction}",
+        "status": status,
+        "direction": direction,
+        "score": f"{score_num}/3",
+        "days": "",
+        "price_impact": impact,
+        "reason": reason,
+        "stretch_atr": float(stretch_atr),
+        "hvn_distance_pct": float(hvn_distance_pct),
+        "score_items": score_items,
+    }
+
 def expected_auction_range_model(
     price,
     atr_now,
     clv_5,
     volume_ratio,
     nearest_hvn_above,
-    nearest_hvn_below
+    nearest_hvn_below,
+    market_regime=None,
+    mean_reversion=None,
+    nearest_hvn=None,
 ):
+    # Range-bound names get a different 5-day range model.
+    # The range is centered around mean reversion pressure, not trend expansion.
+    if market_regime is not None and market_regime.get("value") == "RANGE_BOUND" and nearest_hvn is not None:
+        distance_to_hvn = abs(price - nearest_hvn)
+
+        # Base operating range is narrower than trend names but expands toward the HVN.
+        if price > nearest_hvn:
+            upside_distance = 0.60 * atr_now
+            downside_distance = 0.75 * atr_now + 0.50 * distance_to_hvn
+            direction = "downward"
+        elif price < nearest_hvn:
+            upside_distance = 0.75 * atr_now + 0.50 * distance_to_hvn
+            downside_distance = 0.60 * atr_now
+            direction = "upward"
+        else:
+            upside_distance = 0.75 * atr_now
+            downside_distance = 0.75 * atr_now
+            direction = "balanced"
+
+        # Apply CLV exhaustion skew in the reversion direction only.
+        skew = 0.0
+        if mean_reversion is not None:
+            if mean_reversion.get("direction") == "UPSIDE_REVERSION" and mean_reversion.get("status") in ["ELEVATED", "HIGH"]:
+                upside_distance *= 1.25
+                downside_distance *= 0.85
+                skew = 0.25
+            elif mean_reversion.get("direction") == "DOWNSIDE_REVERSION" and mean_reversion.get("status") in ["ELEVATED", "HIGH"]:
+                upside_distance *= 0.85
+                downside_distance *= 1.25
+                skew = -0.25
+
+        low = price - downside_distance
+        high = price + upside_distance
+
+        reason = (
+            f"Range-bound mean-reversion range skewed {direction}; "
+            f"HVN anchor {money0(nearest_hvn)}; "
+            f"stretch {mean_reversion.get('stretch_atr', 0):+.1f} ATR."
+            if mean_reversion is not None
+            else f"Range-bound mean-reversion range around HVN anchor {money0(nearest_hvn)}."
+        )
+
+        return {
+            "value": f"{money0(low)} to {money0(high)}",
+            "score": f"Skew {skew:.2f}",
+            "low": float(low),
+            "high": float(high),
+            "skew": float(skew),
+            "reason": reason
+        }
+
+    # Trending / default model: blended ATR/HVN envelope with CLV + volume skew.
     atr_up_distance = atr_now
     atr_down_distance = atr_now
 
@@ -496,7 +640,6 @@ def expected_auction_range_model(
         "skew": float(skew),
         "reason": reason
     }
-
 
 def expansion_potential_model(
     df,
@@ -684,6 +827,15 @@ def auction_model_base(raw_df, benchmark_df, hvn_window=252):
         price=price
     )
 
+    mean_reversion = mean_reversion_model(
+        price=price,
+        nearest_hvn=nearest_hvn,
+        atr_now=atr_now,
+        clv_5=clv_5,
+        clv_10=clv_10,
+        hvn_distance_pct=hvn_distance_pct
+    )
+
     bias = near_term_bias_model(
         clv_5=clv_5,
         volume_ratio=volume_ratio,
@@ -693,13 +845,32 @@ def auction_model_base(raw_df, benchmark_df, hvn_window=252):
         relative_strength=relative_strength
     )
 
+    # In range-bound regimes, direction-change signals should come from the
+    # mean-reversion engine rather than the trend/expansion engine.
+    if market_regime["value"] == "RANGE_BOUND" and mean_reversion["status"] in ["ELEVATED", "HIGH"]:
+        if mean_reversion["direction"] == "UPSIDE_REVERSION":
+            bias = {
+                "value": "BULLISH",
+                "score": mean_reversion["score"],
+                "reason": "Range-bound reversal: price stretched below HVN with CLV exhaustion."
+            }
+        elif mean_reversion["direction"] == "DOWNSIDE_REVERSION":
+            bias = {
+                "value": "BEARISH",
+                "score": mean_reversion["score"],
+                "reason": "Range-bound reversal: price stretched above HVN with CLV exhaustion."
+            }
+
     expected_range = expected_auction_range_model(
         price=price,
         atr_now=atr_now,
         clv_5=clv_5,
         volume_ratio=volume_ratio,
         nearest_hvn_above=nearest_hvn_above,
-        nearest_hvn_below=nearest_hvn_below
+        nearest_hvn_below=nearest_hvn_below,
+        market_regime=market_regime,
+        mean_reversion=mean_reversion,
+        nearest_hvn=nearest_hvn
     )
 
     expansion = expansion_potential_model(
@@ -723,6 +894,7 @@ def auction_model_base(raw_df, benchmark_df, hvn_window=252):
         "near_term_bias": bias,
         "relative_strength": relative_strength,
         "market_regime": market_regime,
+        "mean_reversion": mean_reversion,
         "institutional_participation": institutional,
         "expected_range": expected_range,
         "hvn_analysis": {
@@ -814,6 +986,10 @@ def price_impact_for_row(attribute, result):
     if attribute == "Market regime":
         return result["market_regime"].get("price_impact", "=")
 
+
+    if attribute == "Mean reversion potential":
+        return result.get("mean_reversion", {}).get("price_impact", "=")
+
     if attribute == "Institutional participation":
         value = result["institutional_participation"]["value"]
         bias = result["near_term_bias"]["value"]
@@ -894,6 +1070,14 @@ def make_summary_table(result):
             result["market_regime"].get("days", ""),
             price_impact_for_row("Market regime", result),
             result["market_regime"]["reason"]
+        ],
+        [
+            "Mean reversion potential",
+            result["mean_reversion"]["value"],
+            result["mean_reversion"]["score"],
+            "",
+            price_impact_for_row("Mean reversion potential", result),
+            result["mean_reversion"]["reason"]
         ],
         [
             "Institutional participation",
