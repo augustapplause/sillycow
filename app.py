@@ -1275,6 +1275,122 @@ def render_backtest_dashboard(backtest_df, ticker, horizon_days=5):
         mime="text/csv"
     )
 
+
+def summarize_backtest_for_database(ticker, benchmark, backtest_df, horizon_days=5):
+    """Create one cumulative summary row for the current ticker backtest."""
+    run_timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if backtest_df is None or backtest_df.empty:
+        return {
+            "run_timestamp": run_timestamp,
+            "ticker": ticker,
+            "benchmark": benchmark,
+            "signals_tested": 0,
+            "directional_accuracy_%": np.nan,
+            "all_bias_accuracy_%": np.nan,
+            "range_close_hit_%": np.nan,
+            "range_full_containment_%": np.nan,
+            "expansion_hit_rate_%": np.nan,
+            "avg_forward_return_%": np.nan,
+            "median_forward_return_%": np.nan,
+            "horizon_days": horizon_days,
+        }
+
+    n = len(backtest_df)
+    directional = backtest_df[backtest_df["directional_scored"]]
+    expansion = backtest_df[backtest_df["expansion_scored"]]
+
+    directional_accuracy = directional["bias_correct"].mean() if len(directional) else np.nan
+    all_bias_accuracy = backtest_df["bias_correct"].mean()
+    range_close_hit = backtest_df["range_close_hit"].mean()
+    range_full_hit = backtest_df["range_full_hit"].mean()
+    expansion_hit_rate = expansion["expansion_hit"].mean() if len(expansion) else np.nan
+    avg_forward_return = backtest_df["forward_5d_return_%"].mean()
+    median_forward_return = backtest_df["forward_5d_return_%"].median()
+
+    latest = backtest_df.iloc[-1]
+
+    return {
+        "run_timestamp": run_timestamp,
+        "ticker": ticker,
+        "benchmark": benchmark,
+        "signals_tested": int(n),
+        "directional_sample": int(len(directional)),
+        "expansion_sample": int(len(expansion)),
+        "directional_accuracy_%": directional_accuracy * 100 if pd.notna(directional_accuracy) else np.nan,
+        "all_bias_accuracy_%": all_bias_accuracy * 100 if pd.notna(all_bias_accuracy) else np.nan,
+        "range_close_hit_%": range_close_hit * 100 if pd.notna(range_close_hit) else np.nan,
+        "range_full_containment_%": range_full_hit * 100 if pd.notna(range_full_hit) else np.nan,
+        "expansion_hit_rate_%": expansion_hit_rate * 100 if pd.notna(expansion_hit_rate) else np.nan,
+        "avg_forward_return_%": avg_forward_return,
+        "median_forward_return_%": median_forward_return,
+        "latest_signal_date": latest.get("signal_date", ""),
+        "latest_near_term_bias": latest.get("near_term_bias", ""),
+        "latest_relative_strength": latest.get("relative_strength", ""),
+        "latest_institutional_participation": latest.get("institutional_participation", ""),
+        "latest_supply_exhaustion": latest.get("supply_exhaustion", ""),
+        "latest_expansion_status": latest.get("expansion_status", ""),
+        "latest_expansion_direction": latest.get("expansion_direction", ""),
+        "horizon_days": horizon_days,
+    }
+
+
+def add_backtest_summary_to_session(ticker, benchmark, backtest_df, horizon_days=5):
+    """Append/replace a ticker backtest summary in Streamlit session state."""
+    if "cumulative_backtest_db" not in st.session_state:
+        st.session_state["cumulative_backtest_db"] = pd.DataFrame()
+
+    row = summarize_backtest_for_database(ticker, benchmark, backtest_df, horizon_days=horizon_days)
+    existing = st.session_state["cumulative_backtest_db"].copy()
+    new_row = pd.DataFrame([row])
+
+    if existing.empty:
+        updated = new_row
+    else:
+        # Keep only the latest run per ticker+benchmark so repeated tests do not duplicate rows.
+        mask = ~(
+            (existing["ticker"].astype(str).str.upper() == ticker.upper())
+            & (existing["benchmark"].astype(str).str.upper() == benchmark.upper())
+        )
+        updated = pd.concat([existing[mask], new_row], ignore_index=True)
+
+    st.session_state["cumulative_backtest_db"] = updated
+
+
+def render_cumulative_backtest_database():
+    st.subheader("Cumulative Backtest Database")
+
+    db = st.session_state.get("cumulative_backtest_db", pd.DataFrame())
+
+    if db.empty:
+        st.info("No cumulative backtest rows yet. Run a ticker with the backtest dashboard enabled.")
+        return
+
+    display_db = db.copy()
+
+    percent_cols = [
+        "directional_accuracy_%",
+        "all_bias_accuracy_%",
+        "range_close_hit_%",
+        "range_full_containment_%",
+        "expansion_hit_rate_%",
+        "avg_forward_return_%",
+        "median_forward_return_%",
+    ]
+
+    for col in percent_cols:
+        if col in display_db.columns:
+            display_db[col] = display_db[col].map(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
+
+    st.dataframe(display_db, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Download cumulative backtest database as CSV",
+        data=db.to_csv(index=False),
+        file_name="cumulative_backtest_database.csv",
+        mime="text/csv"
+    )
+
 def run_model_streamlit(ticker, benchmark):
     global BENCHMARK_TICKER
     BENCHMARK_TICKER = benchmark.upper().strip()
@@ -1310,10 +1426,16 @@ def main():
         benchmark = st.text_input("Benchmark", value="SPY").strip().upper()
         run_backtest = st.checkbox("Run backtest dashboard", value=True)
         backtest_lookback = st.slider("Backtest signals", min_value=30, max_value=150, value=80, step=10)
+        clear_cumulative = st.button("Clear cumulative database")
         run_button = st.button("Run model", type="primary")
+
+    if clear_cumulative:
+        st.session_state["cumulative_backtest_db"] = pd.DataFrame()
+        st.success("Cumulative backtest database cleared.")
 
     if not ticker:
         st.info("Enter a ticker to begin.")
+        render_cumulative_backtest_database()
         return
 
     if run_button:
@@ -1348,11 +1470,15 @@ def main():
                 with st.spinner(f"Running {backtest_lookback}-signal backtest for {ticker}..."):
                     backtest_df = run_backtest_cached(df, benchmark_df, lookback_days=backtest_lookback, horizon_days=5)
                 render_backtest_dashboard(backtest_df, ticker, horizon_days=5)
+                add_backtest_summary_to_session(ticker, benchmark, backtest_df, horizon_days=5)
+
+            render_cumulative_backtest_database()
 
         except Exception as e:
             st.error(str(e))
     else:
         st.caption("Enter a ticker and click Run model.")
+        render_cumulative_backtest_database()
 
 
 if __name__ == "__main__":
