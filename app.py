@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
+import html
 
 
 BENCHMARK_TICKER = "SPY"
@@ -859,23 +860,122 @@ def make_summary_table(result):
 
 
 
+def normalize_ohlcv_columns(data, ticker=None):
+    """Normalize yfinance output into Open/High/Low/Close/Volume columns."""
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    data = data.copy()
+
+    if isinstance(data.columns, pd.MultiIndex):
+        required = {"Open", "High", "Low", "Close", "Volume"}
+        level0 = set(map(str, data.columns.get_level_values(0)))
+        level_last = set(map(str, data.columns.get_level_values(-1)))
+
+        if required.issubset(level0):
+            data.columns = data.columns.get_level_values(0)
+        elif required.issubset(level_last):
+            data.columns = data.columns.get_level_values(-1)
+        elif ticker is not None:
+            ticker_upper = str(ticker).upper()
+            for level in range(data.columns.nlevels):
+                labels = [str(x).upper() for x in data.columns.get_level_values(level)]
+                if ticker_upper in labels:
+                    try:
+                        data = data.xs(
+                            key=data.columns.get_level_values(level)[labels.index(ticker_upper)],
+                            axis=1,
+                            level=level
+                        )
+                    except Exception:
+                        pass
+                    break
+
+    data = data.loc[:, ~data.columns.duplicated()]
+
+    required_cols = ["Open", "High", "Low", "Close", "Volume"]
+    missing = [c for c in required_cols if c not in data.columns]
+    if missing:
+        raise ValueError(f"Downloaded data is missing columns: {missing}")
+
+    return data[required_cols].dropna()
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_ohlcv(ticker):
+    ticker = str(ticker).strip().upper()
+
     data = yf.download(
         ticker,
         period="2y",
         interval="1d",
         auto_adjust=False,
-        progress=False
+        progress=False,
+        threads=False
     )
 
-    if data.empty:
-        return data
+    return normalize_ohlcv_columns(data, ticker=ticker)
 
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
 
-    return data[["Open", "High", "Low", "Close", "Volume"]].dropna()
+def render_summary_table(summary_table):
+    """Render a readable table with wrapped Reason text for Streamlit."""
+    df = summary_table.fillna("").copy()
+
+    st.markdown(
+        """
+        <style>
+        .apm-table-wrap {
+            width: 100%;
+            overflow-x: auto;
+            border: 1px solid rgba(250, 250, 250, 0.15);
+            border-radius: 8px;
+        }
+        table.apm-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+            font-size: 0.92rem;
+        }
+        table.apm-table th, table.apm-table td {
+            border-bottom: 1px solid rgba(250, 250, 250, 0.12);
+            padding: 0.55rem 0.65rem;
+            vertical-align: top;
+            white-space: normal;
+            word-break: break-word;
+        }
+        table.apm-table th {
+            font-weight: 700;
+            text-align: left;
+            background: rgba(128, 128, 128, 0.16);
+        }
+        table.apm-table th:nth-child(1), table.apm-table td:nth-child(1) { width: 14%; }
+        table.apm-table th:nth-child(2), table.apm-table td:nth-child(2) { width: 15%; }
+        table.apm-table th:nth-child(3), table.apm-table td:nth-child(3) { width: 8%; }
+        table.apm-table th:nth-child(4), table.apm-table td:nth-child(4) { width: 7%; text-align: center; }
+        table.apm-table th:nth-child(5), table.apm-table td:nth-child(5) { width: 8%; text-align: center; font-weight: 700; }
+        table.apm-table th:nth-child(6), table.apm-table td:nth-child(6) { width: 48%; }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    html_rows = []
+    for _, row in df.iterrows():
+        cells = []
+        for col in df.columns:
+            cells.append(f"<td>{html.escape(str(row[col]))}</td>")
+        html_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    header = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
+    table_html = (
+        '<div class="apm-table-wrap">'
+        '<table class="apm-table">'
+        f'<thead><tr>{header}</tr></thead>'
+        f'<tbody>{"".join(html_rows)}</tbody>'
+        '</table>'
+        '</div>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def build_chart(df, result, ticker):
@@ -1004,11 +1104,16 @@ def main():
             col4.metric("Last data bar", str(result["last_bar_date"]))
 
             st.subheader("Model Output")
-            st.dataframe(
-                summary_table,
-                use_container_width=True,
-                hide_index=True
-            )
+            render_summary_table(summary_table)
+
+            with st.expander("Show as downloadable dataframe"):
+                st.dataframe(summary_table, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "Download table as CSV",
+                    data=summary_table.to_csv(index=False),
+                    file_name=f"{ticker}_auction_pressure_model.csv",
+                    mime="text/csv"
+                )
 
             st.subheader("Chart")
             fig = build_chart(df, result, ticker)
