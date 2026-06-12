@@ -188,6 +188,92 @@ def relative_strength_model(stock_df, benchmark_df, benchmark_name="SPY"):
     }
 
 
+
+def market_regime_model(df, relative_strength=None, hvn_distance_pct=None):
+    """Classify whether the ticker is behaving like a trend name or a range-bound name.
+
+    Uses only daily OHLCV-derived data already pulled from yfinance.
+    - MA50 vs MA120 captures medium-term trend.
+    - MA50 slope captures whether trend is strengthening or weakening.
+    - Relative strength vs benchmark confirms whether the move is stock-specific.
+    - HVN distance helps identify whether price is sitting in value or leaving value.
+    """
+    if len(df) < 120:
+        return {
+            "value": "UNAVAILABLE",
+            "score": "",
+            "reason": "Not enough history for regime classification.",
+            "price_impact": "=",
+        }
+
+    closes = df["Close"]
+    price = float(closes.iloc[-1])
+
+    ma50 = float(closes.rolling(50).mean().iloc[-1])
+    ma120 = float(closes.rolling(120).mean().iloc[-1])
+    ma50_prev = float(closes.rolling(50).mean().iloc[-21]) if len(df) >= 141 else ma50
+
+    ma50_slope = (ma50 / (ma50_prev + 1e-9)) - 1
+    price_vs_ma50 = (price / (ma50 + 1e-9)) - 1
+    ma50_vs_ma120 = (ma50 / (ma120 + 1e-9)) - 1
+
+    rs_value = relative_strength.get("value", "NEUTRAL") if relative_strength else "NEUTRAL"
+    rs_positive = rs_value in ["STRONG", "POSITIVE"]
+    rs_negative = rs_value in ["WEAK", "NEGATIVE"]
+
+    hvn_away = abs(hvn_distance_pct or 0) > 3
+
+    up_items = {
+        "price above 50d MA": price > ma50,
+        "50d MA above 120d MA": ma50 > ma120,
+        "50d MA rising": ma50_slope > 0.01,
+        "relative strength positive": rs_positive,
+        "away from HVN balance": hvn_away,
+    }
+
+    down_items = {
+        "price below 50d MA": price < ma50,
+        "50d MA below 120d MA": ma50 < ma120,
+        "50d MA falling": ma50_slope < -0.01,
+        "relative strength negative": rs_negative,
+        "away from HVN balance": hvn_away,
+    }
+
+    up_score = sum(up_items.values())
+    down_score = sum(down_items.values())
+
+    if up_score >= 4 and up_score > down_score:
+        value = "TRENDING_UP"
+        score = f"{up_score}/5"
+        impact = "+"
+        passed = [k for k, v in up_items.items() if v]
+        reason = "Trend regime: " + "; ".join(passed[:3]) + "."
+    elif down_score >= 4 and down_score > up_score:
+        value = "TRENDING_DOWN"
+        score = f"{down_score}/5"
+        impact = "-"
+        passed = [k for k, v in down_items.items() if v]
+        reason = "Downtrend regime: " + "; ".join(passed[:3]) + "."
+    else:
+        value = "RANGE_BOUND"
+        score = f"{max(up_score, down_score)}/5"
+        impact = "="
+        reason = "Range regime: trend evidence is mixed or insufficient."
+
+    return {
+        "value": value,
+        "score": score,
+        "reason": reason,
+        "price_impact": impact,
+        "ma50": ma50,
+        "ma120": ma120,
+        "ma50_slope": float(ma50_slope),
+        "price_vs_ma50": float(price_vs_ma50),
+        "ma50_vs_ma120": float(ma50_vs_ma120),
+        "up_score": int(up_score),
+        "down_score": int(down_score),
+    }
+
 def institutional_participation_model(df):
     latest = df.iloc[-1]
 
@@ -583,6 +669,12 @@ def auction_model_base(raw_df, benchmark_df, hvn_window=252):
 
     relative_strength = relative_strength_model(raw_df, benchmark_df, BENCHMARK_TICKER)
 
+    market_regime = market_regime_model(
+        df=df,
+        relative_strength=relative_strength,
+        hvn_distance_pct=hvn_distance_pct
+    )
+
     institutional = institutional_participation_model(df)
 
     supply = supply_exhaustion_model(
@@ -630,6 +722,7 @@ def auction_model_base(raw_df, benchmark_df, hvn_window=252):
         "last_bar_date": df.index[-1].date(),
         "near_term_bias": bias,
         "relative_strength": relative_strength,
+        "market_regime": market_regime,
         "institutional_participation": institutional,
         "expected_range": expected_range,
         "hvn_analysis": {
@@ -666,6 +759,7 @@ def count_streak(states):
 def compute_streaks(raw_df, benchmark_df, lookback=20):
     states = {
         "near_term_bias": [],
+        "market_regime": [],
         "institutional_participation": [],
         "supply_exhaustion": [],
         "expansion_potential": []
@@ -682,6 +776,7 @@ def compute_streaks(raw_df, benchmark_df, lookback=20):
             r = auction_model_base(partial_stock, partial_benchmark)
 
             states["near_term_bias"].append(r["near_term_bias"]["value"])
+            states["market_regime"].append(r["market_regime"]["value"])
             states["institutional_participation"].append(r["institutional_participation"]["value"])
             states["supply_exhaustion"].append(r["supply_exhaustion"]["value"])
             states["expansion_potential"].append(r["expansion_potential"]["status"])
@@ -696,6 +791,7 @@ def auction_model(raw_df, benchmark_df):
     streaks = compute_streaks(raw_df, benchmark_df, lookback=20)
 
     result["near_term_bias"]["days"] = streaks["near_term_bias"]
+    result["market_regime"]["days"] = streaks["market_regime"]
     result["institutional_participation"]["days"] = streaks["institutional_participation"]
     result["supply_exhaustion"]["days"] = streaks["supply_exhaustion"]
     result["expansion_potential"]["days"] = streaks["expansion_potential"]
@@ -714,6 +810,9 @@ def price_impact_for_row(attribute, result):
 
     if attribute == "Relative strength":
         return result["relative_strength"]["price_impact"]
+
+    if attribute == "Market regime":
+        return result["market_regime"].get("price_impact", "=")
 
     if attribute == "Institutional participation":
         value = result["institutional_participation"]["value"]
@@ -787,6 +886,14 @@ def make_summary_table(result):
             result["relative_strength"]["days"],
             price_impact_for_row("Relative strength", result),
             result["relative_strength"]["reason"]
+        ],
+        [
+            "Market regime",
+            result["market_regime"]["value"],
+            result["market_regime"]["score"],
+            result["market_regime"].get("days", ""),
+            price_impact_for_row("Market regime", result),
+            result["market_regime"]["reason"]
         ],
         [
             "Institutional participation",
@@ -1138,6 +1245,7 @@ def run_backtest_cached(stock_df, benchmark_df, lookback_days=80, horizon_days=5
                 "range_low": float(result["expected_range"]["low"]),
                 "range_high": float(result["expected_range"]["high"]),
                 "relative_strength": result["relative_strength"]["value"],
+                "market_regime": result["market_regime"]["value"],
                 "institutional_participation": result["institutional_participation"]["value"],
                 "supply_exhaustion": result["supply_exhaustion"]["value"],
                 "expansion_status": result["expansion_potential"]["status"],
@@ -1258,6 +1366,7 @@ def render_backtest_dashboard(backtest_df, ticker, horizon_days=5):
         "expansion_direction",
         "expansion_hit",
         "relative_strength",
+        "market_regime",
         "institutional_participation",
         "supply_exhaustion",
     ]
@@ -1327,6 +1436,7 @@ def summarize_backtest_for_database(ticker, benchmark, backtest_df, horizon_days
         "latest_signal_date": latest.get("signal_date", ""),
         "latest_near_term_bias": latest.get("near_term_bias", ""),
         "latest_relative_strength": latest.get("relative_strength", ""),
+        "latest_market_regime": latest.get("market_regime", ""),
         "latest_institutional_participation": latest.get("institutional_participation", ""),
         "latest_supply_exhaustion": latest.get("supply_exhaustion", ""),
         "latest_expansion_status": latest.get("expansion_status", ""),
