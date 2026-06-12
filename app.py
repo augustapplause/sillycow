@@ -1053,6 +1053,228 @@ def build_chart(df, result, ticker):
     return fig
 
 
+
+
+def evaluate_signal_accuracy(signal_row, future_df, neutral_band=0.01):
+    entry_price = signal_row["entry_price"]
+    future_close = float(future_df["Close"].iloc[-1])
+    future_high = float(future_df["High"].max())
+    future_low = float(future_df["Low"].min())
+    forward_return = (future_close / entry_price) - 1
+
+    bias = signal_row["near_term_bias"]
+    if bias == "BULLISH":
+        bias_correct = forward_return > 0
+    elif bias == "BEARISH":
+        bias_correct = forward_return < 0
+    else:
+        bias_correct = abs(forward_return) <= neutral_band
+
+    directional_scored = bias in ["BULLISH", "BEARISH"]
+
+    range_low = signal_row["range_low"]
+    range_high = signal_row["range_high"]
+    range_close_hit = range_low <= future_close <= range_high
+    range_full_hit = future_low >= range_low and future_high <= range_high
+
+    expansion_status = signal_row["expansion_status"]
+    expansion_direction = signal_row["expansion_direction"]
+    expansion_scored = expansion_status in ["WATCH", "ELEVATED", "HIGH"]
+
+    if not expansion_scored:
+        expansion_hit = None
+    elif expansion_direction == "UPSIDE":
+        expansion_hit = future_high >= signal_row["expansion_upside"]
+    elif expansion_direction == "DOWNSIDE":
+        expansion_hit = future_low <= signal_row["expansion_downside"]
+    else:
+        expansion_hit = (
+            future_high >= signal_row["expansion_upside"]
+            or future_low <= signal_row["expansion_downside"]
+        )
+
+    return {
+        "forward_close": future_close,
+        "forward_high": future_high,
+        "forward_low": future_low,
+        "forward_5d_return_%": forward_return * 100,
+        "bias_correct": bool(bias_correct),
+        "directional_scored": bool(directional_scored),
+        "range_close_hit": bool(range_close_hit),
+        "range_full_hit": bool(range_full_hit),
+        "expansion_scored": bool(expansion_scored),
+        "expansion_hit": expansion_hit,
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def run_backtest_cached(stock_df, benchmark_df, lookback_days=80, horizon_days=5):
+    records = []
+
+    min_history = 140
+    if len(stock_df) < min_history + horizon_days + 1:
+        return pd.DataFrame()
+
+    start_idx = max(min_history, len(stock_df) - lookback_days - horizon_days)
+    end_idx = len(stock_df) - horizon_days
+
+    for i in range(start_idx, end_idx):
+        try:
+            signal_df = stock_df.iloc[:i].copy()
+            future_df = stock_df.iloc[i:i + horizon_days].copy()
+            signal_date = signal_df.index[-1]
+
+            partial_benchmark = benchmark_df[benchmark_df.index <= signal_date].copy()
+            if len(partial_benchmark) < min_history:
+                continue
+
+            result = auction_model_base(signal_df, partial_benchmark)
+
+            row = {
+                "signal_date": signal_date.date(),
+                "entry_price": float(result["ticker_price"]),
+                "near_term_bias": result["near_term_bias"]["value"],
+                "bias_score": result["near_term_bias"]["score"],
+                "range_low": float(result["expected_range"]["low"]),
+                "range_high": float(result["expected_range"]["high"]),
+                "relative_strength": result["relative_strength"]["value"],
+                "institutional_participation": result["institutional_participation"]["value"],
+                "supply_exhaustion": result["supply_exhaustion"]["value"],
+                "expansion_status": result["expansion_potential"]["status"],
+                "expansion_direction": result["expansion_potential"]["direction"],
+                "expansion_upside": float(result["expansion_potential"]["upside_target"]),
+                "expansion_downside": float(result["expansion_potential"]["downside_target"]),
+                "discovery_state": result["discovery_state"]["value"],
+            }
+
+            outcome = evaluate_signal_accuracy(row, future_df, neutral_band=0.01)
+            row.update(outcome)
+            records.append(row)
+        except Exception:
+            continue
+
+    return pd.DataFrame(records)
+
+
+def pct_text(value):
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{value * 100:.0f}%"
+
+
+def render_backtest_dashboard(backtest_df, ticker, horizon_days=5):
+    st.subheader("Backtest Dashboard")
+
+    if backtest_df.empty:
+        st.warning("Not enough valid historical signals to backtest this ticker.")
+        return
+
+    n = len(backtest_df)
+
+    directional = backtest_df[backtest_df["directional_scored"]]
+    directional_accuracy = directional["bias_correct"].mean() if len(directional) else np.nan
+
+    all_bias_accuracy = backtest_df["bias_correct"].mean()
+    range_close_hit = backtest_df["range_close_hit"].mean()
+    range_full_hit = backtest_df["range_full_hit"].mean()
+
+    expansion = backtest_df[backtest_df["expansion_scored"]].copy()
+    expansion_hit_rate = expansion["expansion_hit"].mean() if len(expansion) else np.nan
+
+    avg_forward_return = backtest_df["forward_5d_return_%"].mean()
+    median_forward_return = backtest_df["forward_5d_return_%"].median()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Signals tested", f"{n}")
+    c2.metric("Directional accuracy", pct_text(directional_accuracy))
+    c3.metric("Range close hit", pct_text(range_close_hit))
+    c4.metric("Range full containment", pct_text(range_full_hit))
+    c5.metric("Expansion hit rate", pct_text(expansion_hit_rate))
+
+    st.caption(
+        "Directional accuracy scores BULLISH/BEARISH calls against the next 5-day close direction. "
+        "Range close hit checks whether the next 5-day close landed inside the model range. "
+        "Full containment checks whether the entire next 5-day high-low path stayed inside the range."
+    )
+
+    accuracy_rows = [
+        {
+            "Measure": "Directional accuracy",
+            "Result": pct_text(directional_accuracy),
+            "Sample": len(directional),
+            "Definition": "BULLISH correct if next 5-day close is higher; BEARISH correct if lower."
+        },
+        {
+            "Measure": "All bias accuracy",
+            "Result": pct_text(all_bias_accuracy),
+            "Sample": n,
+            "Definition": "Includes NEUTRAL as correct only when next 5-day return is within +/-1%."
+        },
+        {
+            "Measure": "5-day range close hit",
+            "Result": pct_text(range_close_hit),
+            "Sample": n,
+            "Definition": "Next 5-day close finished inside the auction range."
+        },
+        {
+            "Measure": "5-day range full containment",
+            "Result": pct_text(range_full_hit),
+            "Sample": n,
+            "Definition": "Entire next 5-day high-low path stayed inside the auction range."
+        },
+        {
+            "Measure": "Expansion hit rate",
+            "Result": pct_text(expansion_hit_rate),
+            "Sample": len(expansion),
+            "Definition": "For WATCH/ELEVATED/HIGH setups, price touched the indicated 1.5x ATR expansion side."
+        },
+        {
+            "Measure": "Average next 5-day return",
+            "Result": f"{avg_forward_return:+.2f}%",
+            "Sample": n,
+            "Definition": "Average forward close-to-close return after each historical signal."
+        },
+        {
+            "Measure": "Median next 5-day return",
+            "Result": f"{median_forward_return:+.2f}%",
+            "Sample": n,
+            "Definition": "Median forward close-to-close return after each historical signal."
+        },
+    ]
+
+    st.markdown("#### Accuracy Summary")
+    st.dataframe(pd.DataFrame(accuracy_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Recent Backtest Signals")
+    display_cols = [
+        "signal_date",
+        "entry_price",
+        "near_term_bias",
+        "forward_5d_return_%",
+        "bias_correct",
+        "range_close_hit",
+        "range_full_hit",
+        "expansion_status",
+        "expansion_direction",
+        "expansion_hit",
+        "relative_strength",
+        "institutional_participation",
+        "supply_exhaustion",
+    ]
+
+    display_df = backtest_df[display_cols].tail(30).copy()
+    display_df["entry_price"] = display_df["entry_price"].map(lambda x: f"${x:,.0f}")
+    display_df["forward_5d_return_%"] = display_df["forward_5d_return_%"].map(lambda x: f"{x:+.2f}%")
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    csv = backtest_df.to_csv(index=False)
+    st.download_button(
+        "Download backtest results as CSV",
+        data=csv,
+        file_name=f"{ticker}_backtest.csv",
+        mime="text/csv"
+    )
+
 def run_model_streamlit(ticker, benchmark):
     global BENCHMARK_TICKER
     BENCHMARK_TICKER = benchmark.upper().strip()
@@ -1086,6 +1308,8 @@ def main():
         st.header("Inputs")
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         benchmark = st.text_input("Benchmark", value="SPY").strip().upper()
+        run_backtest = st.checkbox("Run backtest dashboard", value=True)
+        backtest_lookback = st.slider("Backtest signals", min_value=30, max_value=150, value=80, step=10)
         run_button = st.button("Run model", type="primary")
 
     if not ticker:
@@ -1119,6 +1343,11 @@ def main():
             fig = build_chart(df, result, ticker)
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
+
+            if run_backtest:
+                with st.spinner(f"Running {backtest_lookback}-signal backtest for {ticker}..."):
+                    backtest_df = run_backtest_cached(df, benchmark_df, lookback_days=backtest_lookback, horizon_days=5)
+                render_backtest_dashboard(backtest_df, ticker, horizon_days=5)
 
         except Exception as e:
             st.error(str(e))
