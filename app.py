@@ -306,6 +306,7 @@ def scan_similar_setups(
             "Date",
             "Close",
             "Future_Close_5D",
+            "Dollar_Change_5D",
             "Forward_Return_5D",
             "Compression_Percentile",
             "CLV_Trend",
@@ -390,13 +391,6 @@ def render_metrics(profile):
     c3.metric("Analog count", m["Historical setup count"])
     c4.metric("Last bar", m["Last data bar"])
 
-    details = pd.DataFrame(
-        [
-            ["CLV trend", m["CLV trend"]],
-            ["Volume support", m["Volume support"]],
-            [k for k in m.keys() if k.startswith("Relative strength")][0:1] + [None],
-        ]
-    )
     rs_key = [k for k in m.keys() if k.startswith("Relative strength")][0]
     details = pd.DataFrame(
         [
