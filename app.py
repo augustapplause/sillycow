@@ -479,7 +479,11 @@ def build_analog_chart(profile, hvns):
     title_name = f"{ticker} ({stock_name})" if stock_name and stock_name.upper() != ticker.upper() else ticker
     latest_close = float(profile["df"].iloc[-1]["Close"])
 
-    fig, ax = plt.subplots(figsize=(15.2, 5.8))
+    fig = plt.figure(figsize=(16.4, 5.8))
+    grid = fig.add_gridspec(1, 2, width_ratios=[1.85, 8.15], wspace=0.08)
+    legend_ax = fig.add_subplot(grid[0, 0])
+    ax = fig.add_subplot(grid[0, 1])
+    legend_ax.set_axis_off()
 
     if analogs.empty:
         ax.text(
@@ -638,18 +642,20 @@ def build_analog_chart(profile, hvns):
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
     ax.set_xlim(min_date - pd.Timedelta(days=x_padding_days), label_x + pd.Timedelta(days=x_padding_days))
     ax.grid(True, alpha=0.24)
-    ax.legend(
+    handles, labels = ax.get_legend_handles_labels()
+    legend_ax.legend(
+        handles,
+        labels,
         loc="center left",
-        bbox_to_anchor=(1.015, 0.5),
         frameon=True,
-        fontsize=14,
+        fontsize=13,
         ncol=1,
         borderaxespad=0.0,
-        labelspacing=0.95,
-        handlelength=2.8,
-        handletextpad=0.8,
+        labelspacing=1.05,
+        handlelength=2.4,
+        handletextpad=0.75,
     )
-    fig.tight_layout(rect=(0, 0, 0.82, 1))
+    fig.subplots_adjust(left=0.015, right=0.99, top=0.89, bottom=0.17, wspace=0.08)
     return fig
 
 def color_class_for_number(value) -> str:
