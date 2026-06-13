@@ -2,6 +2,7 @@ import html
 from typing import List, Optional
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator, StrMethodFormatter
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -82,6 +83,26 @@ def download_ohlcv(ticker: str, period: str):
         threads=False,
     )
     return normalize_ohlcv_columns(raw, ticker=ticker)
+
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_ticker_display_name(ticker: str) -> str:
+    ticker = str(ticker).strip().upper()
+    if not ticker:
+        return ""
+
+    try:
+        info = yf.Ticker(ticker).get_info()
+    except Exception:
+        return ticker
+
+    for key in ["shortName", "longName", "displayName"]:
+        value = info.get(key) if isinstance(info, dict) else None
+        if value:
+            return str(value)
+
+    return ticker
 
 
 def clv(df):
@@ -303,8 +324,11 @@ def build_profile(
     df = add_profile_columns(raw, benchmark_df)
     df = df.dropna(subset=["Compression_Percentile", "CLV_Trend", "Volume_Ratio"])
 
+    ticker_upper = ticker.upper()
+
     return {
-        "ticker": ticker.upper(),
+        "ticker": ticker_upper,
+        "stock_name": get_ticker_display_name(ticker_upper),
         "df": df,
         "analogs": scan_similar_setups(
             df,
@@ -386,23 +410,28 @@ def inject_custom_css():
         div[data-testid="stMetric"] {
             border: 1px solid #dfe5ef;
             border-radius: 10px;
-            padding: 8px 8px;
+            padding: 7px 6px;
             background: white;
-            min-height: 92px;
-            overflow: hidden;
+            min-height: 106px;
+            overflow: visible;
         }
         div[data-testid="stMetricLabel"] {
-            font-size: 0.70rem;
+            font-size: 0.62rem;
             font-weight: 800;
-            line-height: 1.05;
-            white-space: normal;
-        }
-        div[data-testid="stMetricValue"] {
-            font-size: 1.10rem;
-            font-weight: 850;
-            line-height: 1.1;
+            line-height: 1.0;
             white-space: normal;
             overflow-wrap: anywhere;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: clamp(0.72rem, 1.05vw, 0.96rem);
+            font-weight: 850;
+            line-height: 1.05;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: 0.62rem;
         }
         </style>
         """,
@@ -422,6 +451,8 @@ def get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile):
 def build_analog_chart(profile, hvns):
     analogs = profile["analogs"]
     ticker = profile["ticker"]
+    stock_name = profile.get("stock_name") or ticker
+    title_name = f"{ticker} - {stock_name}" if stock_name.upper() != ticker.upper() else ticker
     latest_close = float(profile["df"].iloc[-1]["Close"])
 
     fig, ax = plt.subplots(figsize=(13, 5.8))
@@ -473,7 +504,12 @@ def build_analog_chart(profile, hvns):
         zorder=4,
     )
 
-    price_span = max(chart_df["Future_Close_5D"].max() - chart_df["Future_Close_5D"].min(), 1)
+    min_y = min(chart_df["Future_Close_5D"].min(), latest_close)
+    max_y = max(chart_df["Future_Close_5D"].max(), latest_close)
+    for h in hvns[:3]:
+        min_y = min(min_y, h["price"])
+        max_y = max(max_y, h["price"])
+    price_span = max(max_y - min_y, 1)
     label_offset = price_span * 0.025
 
     ax.axhline(
@@ -507,10 +543,12 @@ def build_analog_chart(profile, hvns):
             fontweight="bold",
         )
 
-    ax.plot([], [], linestyle="--", color="green", label="Top 3 HVNs")
+    if hvns:
+        ax.plot([], [], linestyle="--", color="green", label="Top 3 HVNs")
 
+    ax.set_ylim(min_y - price_span * 0.08, max_y + price_span * 0.08)
     ax.set_title(
-        f"{ticker}: Historical Similar Compression Setups — Price 5 Days Later",
+        f"{title_name}: Historical Similar Compression Setups — Price 5 Days Later",
         fontsize=18,
         fontweight="bold",
         pad=16,
@@ -588,19 +626,37 @@ def build_distribution_chart(profile, bins_count):
         labels.append(f"${lo:,.0f} to ${hi:,.0f}")
 
     y = np.arange(len(labels))
+    max_count = int(counts.max()) if len(counts) else 0
+
+    # Keep text large, but scale it down enough to prevent overlap when the
+    # slider creates many thin bars.
+    bar_label_size = max(8, min(15, int(24 - bins_count * 0.55)))
+    axis_tick_size = max(8, min(14, int(21 - bins_count * 0.45)))
+    axis_title_size = max(11, min(15, int(20 - bins_count * 0.25)))
+
     ax.barh(y, counts, color="#0d5bd6")
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=11)
+    ax.set_yticklabels(labels, fontsize=axis_tick_size)
     ax.invert_yaxis()
-    ax.set_xlabel("Count", fontsize=13, fontweight="bold")
-    ax.set_ylabel("Dollar Change (5D)", fontsize=13, fontweight="bold")
-    ax.tick_params(axis="x", labelsize=11)
+    ax.set_xlabel("Count", fontsize=axis_title_size, fontweight="bold")
+    ax.set_ylabel("Dollar Change (5D)", fontsize=axis_title_size, fontweight="bold")
+    ax.tick_params(axis="x", labelsize=axis_tick_size)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.0f}"))
     ax.grid(axis="x", alpha=0.22)
 
+    label_pad = max(max_count * 0.025, 0.12)
     for i, count in enumerate(counts):
-        ax.text(count + 0.15, i, str(int(count)), va="center", fontsize=10, fontweight="bold")
+        ax.text(
+            int(count) + label_pad,
+            i,
+            f"{int(count)}",
+            va="center",
+            fontsize=bar_label_size,
+            fontweight="bold",
+        )
 
-    ax.set_xlim(0, max(int(counts.max()) + 3, 5))
+    ax.set_xlim(0, max(max_count + 2, 5))
     fig.tight_layout()
     return fig
 
@@ -658,9 +714,10 @@ def render_analogs_table(profile):
         subset=["Dollar_Change_5D", "Forward_Return_5D"],
     )
 
-    height = min(900, max(340, 38 * (len(analogs) + 1)))
+    visible_rows = min(len(analogs), 10)
+    height = 38 * (visible_rows + 1)
     st.dataframe(styled, use_container_width=True, hide_index=True, height=height)
-    st.caption(f"Showing all {len(analogs)} entries")
+    st.caption(f"Showing all {len(analogs)} entries. Scroll inside the table to view rows beyond the first 10.")
 
 
 def render_hvn_section(profile):
@@ -673,10 +730,18 @@ def render_hvn_section(profile):
             "HVN Selection",
             ["Top 5 by Volume", "Top 10 by Volume", "Top 20 by Volume"],
             index=1,
+            key="hvn_selection",
         )
         hvn_count = int(hvn_selection.split()[1])
-        min_volume_percentile = st.slider("Minimum Volume Percentile", 50, 99, 85, 1)
-        hvn_decay_days = st.slider("Node Decay (Days)", 30, 365, 180, 1)
+        min_volume_percentile = st.slider(
+            "Minimum Volume Percentile",
+            50,
+            99,
+            85,
+            1,
+            key="hvn_min_volume_percentile",
+        )
+        hvn_decay_days = st.slider("Node Decay (Days)", 30, 365, 180, 1, key="hvn_decay_days")
         st.info(
             "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
             "higher values include more historical data."
@@ -717,9 +782,13 @@ def render_hvn_section(profile):
 
 
 def render_profile(profile):
-    preview_hvns = get_active_hvns(profile, 10, 180, 85)
+    hvn_selection = st.session_state.get("hvn_selection", "Top 10 by Volume")
+    hvn_count = int(str(hvn_selection).split()[1])
+    hvn_decay_days = st.session_state.get("hvn_decay_days", 180)
+    min_volume_percentile = st.session_state.get("hvn_min_volume_percentile", 85)
+    active_hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
 
-    fig = build_analog_chart(profile, preview_hvns)
+    fig = build_analog_chart(profile, active_hvns)
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
 
