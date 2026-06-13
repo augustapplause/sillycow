@@ -284,6 +284,32 @@ def scan_similar_setups(
     if out.empty:
         return pd.DataFrame()
 
+    # De-cluster matches so long compression regimes do not create many
+    # near-duplicate analogs. Within each 10-trading-day cluster, keep the
+    # candidate closest to the current compression percentile.
+    out["_Compression_Distance"] = (
+        out["Compression_Percentile"] - current["Compression_Percentile"]
+    ).abs()
+    out = out.sort_index()
+    index_positions = pd.Series(np.arange(len(df.index)), index=df.index)
+    selected_indices = []
+    remaining = list(out.index)
+    cluster_window_bars = 10
+
+    while remaining:
+        cluster_start = remaining[0]
+        start_pos = int(index_positions.loc[cluster_start])
+        cluster = [
+            idx
+            for idx in remaining
+            if int(index_positions.loc[idx]) - start_pos <= cluster_window_bars
+        ]
+        best_idx = out.loc[cluster, "_Compression_Distance"].idxmin()
+        selected_indices.append(best_idx)
+        remaining = [idx for idx in remaining if idx not in cluster]
+
+    out = out.loc[selected_indices].sort_index().drop(columns=["_Compression_Distance"])
+
     out = out.reset_index().rename(columns={"index": "Date"})
     out["Date"] = pd.to_datetime(out["Date"]).dt.date
     out["Dollar_Change_5D"] = out["Future_Close_5D"] - out["Close"]
@@ -424,14 +450,14 @@ def inject_custom_css():
         }
         .summary-label {
             color: #33405f;
-            font-size: 0.74rem;
-            line-height: 1.08;
+            font-size: clamp(0.78rem, 0.95vw, 0.92rem);
+            line-height: 1.05;
             font-weight: 850;
             white-space: normal;
             overflow-wrap: normal;
             word-break: normal;
-            min-height: 1.65rem;
-            max-height: 1.7rem;
+            min-height: 2.1rem;
+            max-height: 2.25rem;
             margin-bottom: 8px;
         }
         .summary-value {
@@ -748,7 +774,7 @@ def build_distribution_chart(profile, bins_count):
     for i in range(len(edges) - 1):
         lo = edges[i]
         hi = edges[i + 1]
-        labels.append(f"${lo:,.0f} to ${hi:,.0f}")
+        labels.append(f"{lo:,.0f} to {hi:,.0f}")
 
     y = np.arange(len(labels))
     max_count = int(counts.max()) if len(counts) else 0
