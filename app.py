@@ -614,7 +614,7 @@ def build_analog_chart(profile, hvns):
             color=item["color"],
             ha=item["ha"],
             va="center",
-            fontsize=14,
+            fontsize=18,
             fontweight="bold",
             arrowprops=arrowprops,
             zorder=5,
@@ -648,12 +648,12 @@ def build_analog_chart(profile, hvns):
         labels,
         loc="center left",
         frameon=True,
-        fontsize=12,
+        fontsize=16,
         ncol=1,
         borderaxespad=0.0,
-        labelspacing=1.05,
-        handlelength=2.0,
-        handletextpad=0.65,
+        labelspacing=1.15,
+        handlelength=2.2,
+        handletextpad=0.75,
     )
     fig.subplots_adjust(left=0.02, right=0.985, top=0.89, bottom=0.17, wspace=0.22)
     return fig
