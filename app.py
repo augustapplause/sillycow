@@ -412,61 +412,55 @@ def inject_custom_css():
             border-radius: 8px;
             overflow: hidden;
         }
-        .summary-grid {
-            display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
-            gap: 0.55rem;
-            margin: 0.7rem 0 1.05rem;
-        }
         .summary-card {
             border: 1px solid #dfe5ef;
             border-radius: 10px;
             background: white;
-            padding: 10px 8px 12px;
-            min-height: 96px;
-            overflow: visible;
+            padding: 9px 8px 12px;
+            min-height: 92px;
+            overflow: hidden;
+            text-align: left;
         }
         .summary-label {
             color: #33405f;
-            font-size: 0.84rem;
-            line-height: 1.05;
+            font-size: 0.74rem;
+            line-height: 1.08;
             font-weight: 850;
             white-space: normal;
-            overflow-wrap: anywhere;
+            overflow-wrap: normal;
+            word-break: normal;
+            min-height: 1.65rem;
+            max-height: 1.7rem;
             margin-bottom: 8px;
         }
         .summary-value {
             color: #111936;
-            font-size: clamp(1.05rem, 1.55vw, 1.55rem);
-            line-height: 1.08;
+            font-size: clamp(1.22rem, 1.7vw, 1.72rem);
+            line-height: 1.05;
             font-weight: 950;
             white-space: normal;
             overflow-wrap: anywhere;
             word-break: break-word;
         }
         .summary-range-value {
-            font-size: clamp(0.95rem, 1.3vw, 1.35rem);
-            line-height: 1.1;
+            font-size: clamp(1.02rem, 1.35vw, 1.42rem);
+            line-height: 1.08;
             font-weight: 950;
             white-space: normal;
             overflow-wrap: anywhere;
             word-break: break-word;
         }
-        @media (max-width: 1100px) {
-            .summary-grid {
-                grid-template-columns: repeat(3, minmax(0, 1fr));
-            }
-        }
-        @media (max-width: 700px) {
-            .summary-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
+        .tab-control-card {
+            border: 1px solid #dfe5ef;
+            border-radius: 10px;
+            padding: 12px 12px 4px;
+            margin-bottom: 10px;
+            background: #ffffff;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 
 def get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile):
     return compute_hvns(
@@ -642,22 +636,18 @@ def render_summary_metrics(profile):
             ("Change Range", change_range_html, "summary-range-value"),
         ]
 
-    cards = []
-    for label, value_html, value_class in metric_items:
-        cards.append(
-            f"""
-            <div class="summary-card">
-                <div class="summary-label">{html.escape(label)}</div>
-                <div class="{value_class}">{value_html}</div>
-            </div>
-            """
-        )
-
-    st.markdown(
-        '<div class="summary-grid">' + "".join(cards) + '</div>',
-        unsafe_allow_html=True,
-    )
-
+    cols = st.columns(6)
+    for col, (label, value_html, value_class) in zip(cols, metric_items):
+        with col:
+            st.markdown(
+                f"""
+                <div class="summary-card">
+                    <div class="summary-label">{html.escape(label)}</div>
+                    <div class="{value_class}">{value_html}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 def build_distribution_chart(profile, bins_count):
     analogs = profile["analogs"]
@@ -781,19 +771,18 @@ def render_analogs_table(profile):
     st.caption(f"Showing all {len(analogs)} entries. Scroll inside the table to view rows beyond the first 10.")
 
 
-def render_hvn_section(profile, key_prefix="main"):
-    st.markdown('<div class="section-title">HVN (High Volume Nodes) ⓘ</div>', unsafe_allow_html=True)
+def render_hvn_controls(key_prefix="main"):
+    st.markdown('<div class="section-title">HVN Controls for This Tab</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.25, 1, 1])
 
-    left, right = st.columns([1.05, 2.55])
-
-    with left:
+    with c1:
         hvn_selection = st.selectbox(
             "HVN Selection",
             ["Top 5 by Volume", "Top 10 by Volume", "Top 20 by Volume"],
             index=1,
             key=f"{key_prefix}_hvn_selection",
         )
-        hvn_count = int(hvn_selection.split()[1])
+    with c2:
         min_volume_percentile = st.slider(
             "Minimum Volume Percentile",
             50,
@@ -802,51 +791,65 @@ def render_hvn_section(profile, key_prefix="main"):
             1,
             key=f"{key_prefix}_hvn_min_volume_percentile",
         )
-        hvn_decay_days = st.slider("Node Decay (Days)", 30, 365, 180, 1, key=f"{key_prefix}_hvn_decay_days")
-        st.info(
-            "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
-            "higher values include more historical data."
+    with c3:
+        hvn_decay_days = st.slider(
+            "Node Decay (Days)",
+            30,
+            365,
+            180,
+            1,
+            key=f"{key_prefix}_hvn_decay_days",
         )
 
-    hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
+    hvn_count = int(hvn_selection.split()[1])
+    return hvn_count, hvn_decay_days, min_volume_percentile
 
-    with right:
-        hvn_table = pd.DataFrame(hvns)
-        if hvn_table.empty:
-            st.info("No HVNs were found.")
-            return
 
-        hvn_table = hvn_table.rename(
-            columns={
-                "price": "Price",
-                "weighted_volume": "Volume (Weighted)",
-                "percent_total": "Percent of Total",
-                "touches": "Touches",
-                "strength": "Strength",
-            }
-        )[["Price", "Volume (Weighted)", "Percent of Total", "Touches", "Strength"]]
+def render_hvn_table(hvns):
+    hvn_table = pd.DataFrame(hvns)
+    if hvn_table.empty:
+        st.info("No HVNs were found.")
+        return
 
-        styled = hvn_table.style.format(
-            {
-                "Price": "${:,.2f}",
-                "Volume (Weighted)": "{:,.0f}",
-                "Percent of Total": "{:.2f}%",
-                "Touches": "{:,.0f}",
-            }
-        ).map(
-            lambda v: "color: green; font-weight: 800;" if v in ["Very Strong", "Strong"] else "color: #ff6a00; font-weight: 800;",
-            subset=["Strength"],
-        )
+    hvn_table = hvn_table.rename(
+        columns={
+            "price": "Price",
+            "weighted_volume": "Volume (Weighted)",
+            "percent_total": "Percent of Total",
+            "touches": "Touches",
+            "strength": "Strength",
+        }
+    )[["Price", "Volume (Weighted)", "Percent of Total", "Touches", "Strength"]]
 
-        st.dataframe(styled, use_container_width=True, hide_index=True, height=365)
-        st.caption("Sorted by price (high to low)")
+    styled = hvn_table.style.format(
+        {
+            "Price": "${:,.2f}",
+            "Volume (Weighted)": "{:,.0f}",
+            "Percent of Total": "{:.2f}%",
+            "Touches": "{:,.0f}",
+        }
+    ).map(
+        lambda v: "color: green; font-weight: 800;" if v in ["Very Strong", "Strong"] else "color: #ff6a00; font-weight: 800;",
+        subset=["Strength"],
+    )
+
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=365)
+    st.caption("Sorted by price (high to low)")
+
+
+def render_hvn_section(active_hvns):
+    st.markdown('<div class="section-title">HVN (High Volume Nodes) ⓘ</div>', unsafe_allow_html=True)
+    st.info(
+        "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
+        "higher values include more historical data."
+    )
+    render_hvn_table(active_hvns)
 
 
 def render_profile(profile, key_prefix="main"):
-    hvn_selection = st.session_state.get(f"{key_prefix}_hvn_selection", "Top 10 by Volume")
-    hvn_count = int(str(hvn_selection).split()[1])
-    hvn_decay_days = st.session_state.get(f"{key_prefix}_hvn_decay_days", 180)
-    min_volume_percentile = st.session_state.get(f"{key_prefix}_hvn_min_volume_percentile", 85)
+    # Each ticker tab gets its own HVN controls. These controls change only the
+    # HVN lines/table for that tab; the sidebar matching metrics remain shared.
+    hvn_count, hvn_decay_days, min_volume_percentile = render_hvn_controls(key_prefix=key_prefix)
     active_hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
 
     fig = build_analog_chart(profile, active_hvns)
@@ -856,8 +859,7 @@ def render_profile(profile, key_prefix="main"):
     render_summary_metrics(profile)
     render_distribution(profile, key_prefix=key_prefix)
     render_analogs_table(profile)
-    render_hvn_section(profile, key_prefix=key_prefix)
-
+    render_hvn_section(active_hvns)
 
 def main():
     st.set_page_config(page_title="Stock Setup Profiler", layout="wide")
