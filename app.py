@@ -377,6 +377,37 @@ def build_profile(
     }
 
 
+
+def inject_custom_css():
+    st.markdown(
+        """
+        <style>
+        /* Keep Streamlit metric cards readable in narrow multi-column sections. */
+        div[data-testid="stMetric"] {
+            min-width: 0;
+        }
+        div[data-testid="stMetricLabel"] {
+            font-size: clamp(0.68rem, 0.85vw, 0.90rem);
+            line-height: 1.15;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: clamp(1.15rem, 2.15vw, 2.05rem);
+            line-height: 1.05;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: clamp(0.65rem, 0.80vw, 0.85rem);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # ----------------------------
 # Rendering
 # ----------------------------
@@ -536,6 +567,7 @@ def compare_profiles_table(profiles: List[dict]) -> pd.DataFrame:
 
 def main():
     st.set_page_config(page_title="Historical Setup Profiler", layout="wide")
+    inject_custom_css()
     st.title("Historical Setup Profiler")
     st.caption(
         "Find historical analogs for the current compression / CLV / volume / relative-strength setup, "
