@@ -257,7 +257,6 @@ def scan_similar_setups(
             "Volume_Ratio",
             "RS_60",
             "Future_Close_5D",
-            "Dollar_Change_5D",
             "Forward_Return_5D",
         ]
     ).copy()
@@ -307,7 +306,6 @@ def scan_similar_setups(
             "Date",
             "Close",
             "Future_Close_5D",
-            "Dollar_Change_5D",
             "Forward_Return_5D",
             "Compression_Percentile",
             "CLV_Trend",
