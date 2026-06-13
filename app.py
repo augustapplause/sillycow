@@ -1,1154 +1,29 @@
+import html
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import yfinance as yf
-import matplotlib.pyplot as plt
 import streamlit as st
-import html
+import yfinance as yf
 
 
-BENCHMARK_TICKER = "SPY"
+# ----------------------------
+# Helpers
+# ----------------------------
 
 
 def money0(x):
-    if x is None:
-        return "Not established"
+    if x is None or pd.isna(x):
+        return "Not available"
     return f"${x:,.0f}"
 
 
-def clv(df):
-    return ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / (
-        df["High"] - df["Low"] + 1e-9
-    )
-
-
-def atr(df, period=14):
-    high_low = df["High"] - df["Low"]
-    high_close = (df["High"] - df["Close"].shift()).abs()
-    low_close = (df["Low"] - df["Close"].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def compute_hvns(df, bins=140, top_nodes=20, decay_days=180):
-    min_price = df["Low"].min()
-    max_price = df["High"].max()
-    bin_edges = np.linspace(min_price, max_price, bins + 1)
-    volume_profile = np.zeros(bins)
-    latest_date = df.index[-1]
-
-    for date, row in df.iterrows():
-        low = row["Low"]
-        high = row["High"]
-        volume = row["Volume"]
-
-        if high <= low or volume <= 0:
-            continue
-
-        age_days = max((latest_date - date).days, 0)
-        weighted_volume = volume * np.exp(-age_days / decay_days)
-
-        touched_bins = np.where(
-            (bin_edges[:-1] <= high) &
-            (bin_edges[1:] >= low)
-        )[0]
-
-        if len(touched_bins) == 0:
-            continue
-
-        volume_per_bin = weighted_volume / len(touched_bins)
-
-        for idx in touched_bins:
-            volume_profile[idx] += volume_per_bin
-
-    peaks = []
-
-    for i in range(1, len(volume_profile) - 1):
-        if volume_profile[i] > volume_profile[i - 1] and volume_profile[i] > volume_profile[i + 1]:
-            peaks.append({
-                "price": float((bin_edges[i] + bin_edges[i + 1]) / 2),
-                "volume": float(volume_profile[i])
-            })
-
-    if not peaks:
-        for idx in np.argsort(volume_profile)[::-1][:top_nodes]:
-            peaks.append({
-                "price": float((bin_edges[idx] + bin_edges[idx + 1]) / 2),
-                "volume": float(volume_profile[idx])
-            })
-
-    top_peaks = sorted(peaks, key=lambda x: x["volume"], reverse=True)[:top_nodes]
-    return sorted(top_peaks, key=lambda x: x["price"])
-
-
-def get_hvn_levels(hvns, price):
-    below = [h for h in hvns if h["price"] < price]
-    above = [h for h in hvns if h["price"] > price]
-
-    nearest_below = below[-1]["price"] if below else None
-    nearest_above = above[0]["price"] if above else None
-    nearest_hvn = min(hvns, key=lambda h: abs(h["price"] - price))["price"]
-
-    return nearest_hvn, nearest_above, nearest_below
-
-
-def add_base_columns(df):
-    df = df.copy()
-
-    df["CLV"] = clv(df)
-    df["ATR"] = atr(df)
-
-    df["Volume_20_Mean"] = df["Volume"].rolling(20).mean()
-    df["Volume_Ratio"] = df["Volume"] / (df["Volume_20_Mean"] + 1e-9)
-
-    df["ATR_20_Mean"] = df["ATR"].rolling(20).mean()
-    df["ATR_Ratio"] = df["ATR"] / (df["ATR_20_Mean"] + 1e-9)
-
-    return df.dropna()
-
-
-def relative_strength_model(stock_df, benchmark_df, benchmark_name="SPY"):
-    stock = stock_df[["Close"]].copy().rename(columns={"Close": "Stock_Close"})
-    bench = benchmark_df[["Close"]].copy().rename(columns={"Close": "Benchmark_Close"})
-
-    combined = stock.join(bench, how="inner").dropna()
-
-    if len(combined) < 80:
-        return {
-            "value": "UNAVAILABLE",
-            "score": "",
-            "days": "",
-            "reason": "Not enough benchmark history.",
-            "price_impact": "="
-        }
-
-    stock_20 = combined["Stock_Close"].iloc[-1] / combined["Stock_Close"].iloc[-21] - 1
-    bench_20 = combined["Benchmark_Close"].iloc[-1] / combined["Benchmark_Close"].iloc[-21] - 1
-    rs_20 = stock_20 - bench_20
-
-    stock_60 = combined["Stock_Close"].iloc[-1] / combined["Stock_Close"].iloc[-61] - 1
-    bench_60 = combined["Benchmark_Close"].iloc[-1] / combined["Benchmark_Close"].iloc[-61] - 1
-    rs_60 = stock_60 - bench_60
-
-    if rs_60 >= 0.10:
-        value = "STRONG"
-        impact = "+"
-    elif rs_60 >= 0.03:
-        value = "POSITIVE"
-        impact = "+"
-    elif rs_60 <= -0.10:
-        value = "WEAK"
-        impact = "-"
-    elif rs_60 <= -0.03:
-        value = "NEGATIVE"
-        impact = "-"
-    else:
-        value = "NEUTRAL"
-        impact = "="
-
-    rs_series = combined["Stock_Close"].pct_change(20) - combined["Benchmark_Close"].pct_change(20)
-
-    states = []
-    for x in rs_series.dropna():
-        if x >= 0.10:
-            states.append("STRONG")
-        elif x >= 0.03:
-            states.append("POSITIVE")
-        elif x <= -0.10:
-            states.append("WEAK")
-        elif x <= -0.03:
-            states.append("NEGATIVE")
-        else:
-            states.append("NEUTRAL")
-
-    days = 0
-    if states:
-        current = states[-1]
-        for s in reversed(states):
-            if s == current:
-                days += 1
-            else:
-                break
-
-    reason = (
-        f"Outperforming {benchmark_name} by {rs_60 * 100:.1f}% over 60 days."
-        if rs_60 > 0
-        else f"Underperforming {benchmark_name} by {abs(rs_60) * 100:.1f}% over 60 days."
-        if rs_60 < 0
-        else f"In line with {benchmark_name} over 60 days."
-    )
-
-    return {
-        "value": value,
-        "score": f"{rs_60 * 100:+.1f}%",
-        "days": days,
-        "reason": reason,
-        "price_impact": impact,
-        "rs_20": float(rs_20),
-        "rs_60": float(rs_60)
-    }
-
-
-
-def market_regime_model(df, relative_strength=None, hvn_distance_pct=None):
-    """Classify whether the ticker is behaving like a trend name or a range-bound name.
-
-    Uses only daily OHLCV-derived data already pulled from yfinance.
-    - MA50 vs MA120 captures medium-term trend.
-    - MA50 slope captures whether trend is strengthening or weakening.
-    - Relative strength vs benchmark confirms whether the move is stock-specific.
-    - HVN distance helps identify whether price is sitting in value or leaving value.
-    """
-    if len(df) < 120:
-        return {
-            "value": "UNAVAILABLE",
-            "score": "",
-            "reason": "Not enough history for regime classification.",
-            "price_impact": "=",
-        }
-
-    closes = df["Close"]
-    price = float(closes.iloc[-1])
-
-    ma50 = float(closes.rolling(50).mean().iloc[-1])
-    ma120 = float(closes.rolling(120).mean().iloc[-1])
-    ma50_prev = float(closes.rolling(50).mean().iloc[-21]) if len(df) >= 141 else ma50
-
-    ma50_slope = (ma50 / (ma50_prev + 1e-9)) - 1
-    price_vs_ma50 = (price / (ma50 + 1e-9)) - 1
-    ma50_vs_ma120 = (ma50 / (ma120 + 1e-9)) - 1
-
-    rs_value = relative_strength.get("value", "NEUTRAL") if relative_strength else "NEUTRAL"
-    rs_positive = rs_value in ["STRONG", "POSITIVE"]
-    rs_negative = rs_value in ["WEAK", "NEGATIVE"]
-
-    hvn_away = abs(hvn_distance_pct or 0) > 3
-
-    up_items = {
-        "price above 50d MA": price > ma50,
-        "50d MA above 120d MA": ma50 > ma120,
-        "50d MA rising": ma50_slope > 0.01,
-        "relative strength positive": rs_positive,
-        "away from HVN balance": hvn_away,
-    }
-
-    down_items = {
-        "price below 50d MA": price < ma50,
-        "50d MA below 120d MA": ma50 < ma120,
-        "50d MA falling": ma50_slope < -0.01,
-        "relative strength negative": rs_negative,
-        "away from HVN balance": hvn_away,
-    }
-
-    up_score = sum(up_items.values())
-    down_score = sum(down_items.values())
-
-    if up_score >= 4 and up_score > down_score:
-        value = "TRENDING_UP"
-        score = f"{up_score}/5"
-        impact = "+"
-        passed = [k for k, v in up_items.items() if v]
-        reason = "Trend regime: " + "; ".join(passed[:3]) + "."
-    elif down_score >= 4 and down_score > up_score:
-        value = "TRENDING_DOWN"
-        score = f"{down_score}/5"
-        impact = "-"
-        passed = [k for k, v in down_items.items() if v]
-        reason = "Downtrend regime: " + "; ".join(passed[:3]) + "."
-    else:
-        value = "RANGE_BOUND"
-        score = f"{max(up_score, down_score)}/5"
-        impact = "="
-        reason = "Range regime: trend evidence is mixed or insufficient."
-
-    return {
-        "value": value,
-        "score": score,
-        "reason": reason,
-        "price_impact": impact,
-        "ma50": ma50,
-        "ma120": ma120,
-        "ma50_slope": float(ma50_slope),
-        "price_vs_ma50": float(price_vs_ma50),
-        "ma50_vs_ma120": float(ma50_vs_ma120),
-        "up_score": int(up_score),
-        "down_score": int(down_score),
-    }
-
-def institutional_participation_model(df):
-    latest = df.iloc[-1]
-
-    volume_ratio = float(latest["Volume_Ratio"])
-    atr_ratio = float(latest["ATR_Ratio"])
-    clv_value = float(latest["CLV"])
-
-    if volume_ratio >= 1.50 and abs(clv_value) >= 0.30:
-        value = "STRONG"
-        score = "3/3"
-    elif volume_ratio >= 1.10 and (abs(clv_value) >= 0.20 or atr_ratio >= 1.10):
-        value = "MODERATE"
-        score = "2/3"
-    else:
-        value = "WEAK"
-        score = "1/3"
-
-    reason = []
-
-    if volume_ratio >= 1.50:
-        reason.append(f"volume strong at {volume_ratio:.2f}x 20-day average")
-    elif volume_ratio >= 1.10:
-        reason.append(f"volume moderately elevated at {volume_ratio:.2f}x 20-day average")
-    else:
-        reason.append(f"volume weak at {volume_ratio:.2f}x 20-day average")
-
-    if clv_value > 0.30:
-        reason.append("CLV shows buyer control")
-    elif clv_value < -0.30:
-        reason.append("CLV shows seller control")
-    else:
-        reason.append("CLV not strongly directional")
-
-    if atr_ratio >= 1.10:
-        reason.append(f"ATR expanding at {atr_ratio:.2f}x")
-    else:
-        reason.append(f"ATR not expanding meaningfully at {atr_ratio:.2f}x")
-
-    reason.append("volume is the primary participation filter")
-
-    return {
-        "value": value,
-        "score": score,
-        "reason": "; ".join(reason),
-        "volume_ratio": volume_ratio,
-        "atr_ratio": atr_ratio,
-        "clv": clv_value
-    }
-
-
-def supply_exhaustion_model(df, clv_5, clv_10, price):
-    recent = df.tail(10)
-    down_bars = recent[recent["Close"] < recent["Open"]]
-
-    sellers_losing_control = clv_5 > clv_10 and clv_5 > -0.15
-
-    down_volume_falling = (
-        len(down_bars) >= 3
-        and down_bars["Volume"].iloc[-1] < down_bars["Volume"].mean()
-    )
-
-    near_lower_range = price <= df["Close"].tail(20).quantile(0.30)
-
-    score_num = sum([
-        sellers_losing_control,
-        down_volume_falling,
-        near_lower_range
-    ])
-
-    if score_num >= 3:
-        value = "LIKELY"
-    elif score_num >= 2:
-        value = "NEARING"
-    else:
-        value = "NOT_EVIDENT"
-
-    reason = [
-        "CLV improving versus 10-day control" if sellers_losing_control else "CLV not yet improving versus 10-day control",
-        "down-volume fading" if down_volume_falling else "down-volume not fading",
-        "price near lower 20-day range" if near_lower_range else "price not near lower 20-day range"
-    ]
-
-    return {
-        "value": value,
-        "score": f"{score_num}/3",
-        "reason": "; ".join(reason),
-        "sellers_losing_control": sellers_losing_control,
-        "down_volume_falling": down_volume_falling,
-        "near_lower_range": near_lower_range
-    }
-
-
-def near_term_bias_model(clv_5, volume_ratio, hvn_distance_pct, supply, institutional, relative_strength=None):
-    volume_component = 0.0
-
-    if volume_ratio > 1.10 and clv_5 > 0:
-        volume_component = 0.20
-    elif volume_ratio > 1.10 and clv_5 < 0:
-        volume_component = -0.20
-
-    supply_support = 0.0
-
-    if supply["value"] == "LIKELY" and clv_5 > -0.10:
-        supply_support = 0.25
-    elif supply["value"] == "NEARING" and clv_5 > -0.10:
-        supply_support = 0.15
-
-    institutional_component = 0.0
-
-    if institutional["value"] == "STRONG" and clv_5 > 0:
-        institutional_component = 0.20
-    elif institutional["value"] == "STRONG" and clv_5 < 0:
-        institutional_component = -0.20
-    elif institutional["value"] == "MODERATE" and clv_5 > 0:
-        institutional_component = 0.10
-    elif institutional["value"] == "MODERATE" and clv_5 < 0:
-        institutional_component = -0.10
-
-    rs_component = 0.0
-    if relative_strength is not None:
-        if relative_strength["value"] in ["STRONG", "POSITIVE"]:
-            rs_component = 0.15
-        elif relative_strength["value"] in ["WEAK", "NEGATIVE"]:
-            rs_component = -0.15
-
-    hvn_component = np.tanh(-(hvn_distance_pct / 100) * 5)
-
-    score = (
-        0.35 * clv_5
-        + 0.17 * volume_component
-        + 0.13 * hvn_component
-        + 0.13 * supply_support
-        + 0.10 * institutional_component
-        + 0.12 * rs_component
-    )
-
-    if score > 0.15:
-        value = "BULLISH"
-        reason = "Buyers have near-term control."
-    elif score < -0.15:
-        value = "BEARISH"
-        reason = "Sellers have near-term control."
-    else:
-        value = "NEUTRAL"
-        reason = "Directional control is mixed."
-
-    return {
-        "value": value,
-        "score": round(float(score), 3),
-        "reason": reason
-    }
-
-
-
-def mean_reversion_model(price, nearest_hvn, atr_now, clv_5, clv_10, hvn_distance_pct):
-    """Range-bound engine using only three inputs:
-    1) HVN distance, 2) ATR-normalized stretch, 3) CLV exhaustion.
-    """
-    if nearest_hvn is None or atr_now <= 0:
-        return {
-            "value": "UNAVAILABLE",
-            "status": "UNAVAILABLE",
-            "direction": "UNCONFIRMED",
-            "score": "0/3",
-            "days": "",
-            "price_impact": "=",
-            "reason": "Not enough HVN/ATR data for mean reversion engine.",
-            "stretch_atr": 0.0,
-            "hvn_distance_pct": 0.0,
-            "score_items": {}
-        }
-
-    distance = price - nearest_hvn
-    stretch_atr = distance / (atr_now + 1e-9)
-    abs_stretch_atr = abs(stretch_atr)
-    abs_hvn_distance_pct = abs(hvn_distance_pct)
-
-    above_hvn = distance > 0
-    below_hvn = distance < 0
-
-    hvn_distance_signal = abs_hvn_distance_pct >= 2.0
-    atr_stretch_signal = abs_stretch_atr >= 1.25
-
-    # Exhaustion is deliberately directional and simple.
-    # Above HVN: upside is tiring if CLV is deteriorating or no longer positive.
-    # Below HVN: downside is tiring if CLV is improving or no longer negative.
-    if above_hvn:
-        clv_exhaustion = (clv_5 < clv_10) or (clv_5 < 0.10)
-        direction = "DOWNSIDE_REVERSION" if clv_exhaustion else "UNCONFIRMED"
-    elif below_hvn:
-        clv_exhaustion = (clv_5 > clv_10) or (clv_5 > -0.10)
-        direction = "UPSIDE_REVERSION" if clv_exhaustion else "UNCONFIRMED"
-    else:
-        clv_exhaustion = False
-        direction = "UNCONFIRMED"
-
-    score_items = {
-        "HVN distance": hvn_distance_signal,
-        "ATR stretch": atr_stretch_signal,
-        "CLV exhaustion": clv_exhaustion,
-    }
-
-    score_num = sum(score_items.values())
-
-    if score_num == 3:
-        status = "HIGH"
-    elif score_num == 2:
-        status = "ELEVATED"
-    elif score_num == 1:
-        status = "WATCH"
-    else:
-        status = "LOW"
-
-    if direction == "UPSIDE_REVERSION" and status in ["ELEVATED", "HIGH"]:
-        impact = "+"
-    elif direction == "DOWNSIDE_REVERSION" and status in ["ELEVATED", "HIGH"]:
-        impact = "-"
-    else:
-        impact = "="
-
-    passed = [k for k, v in score_items.items() if v]
-    missing = [k for k, v in score_items.items() if not v]
-
-    reason = (
-        f"Stretch {stretch_atr:+.1f} ATR from HVN; "
-        f"passed: {', '.join(passed) if passed else 'none'}; "
-        f"missing: {', '.join(missing) if missing else 'none'}."
-    )
-
-    return {
-        "value": f"{status} / {direction}",
-        "status": status,
-        "direction": direction,
-        "score": f"{score_num}/3",
-        "days": "",
-        "price_impact": impact,
-        "reason": reason,
-        "stretch_atr": float(stretch_atr),
-        "hvn_distance_pct": float(hvn_distance_pct),
-        "score_items": score_items,
-    }
-
-def expected_auction_range_model(
-    price,
-    atr_now,
-    clv_5,
-    volume_ratio,
-    nearest_hvn_above,
-    nearest_hvn_below,
-    market_regime=None,
-    mean_reversion=None,
-    nearest_hvn=None,
-):
-    # Range-bound names get a different 5-day range model.
-    # The range is centered around mean reversion pressure, not trend expansion.
-    if market_regime is not None and market_regime.get("value") == "RANGE_BOUND" and nearest_hvn is not None:
-        distance_to_hvn = abs(price - nearest_hvn)
-
-        # Base operating range is narrower than trend names but expands toward the HVN.
-        if price > nearest_hvn:
-            upside_distance = 0.60 * atr_now
-            downside_distance = 0.75 * atr_now + 0.50 * distance_to_hvn
-            direction = "downward"
-        elif price < nearest_hvn:
-            upside_distance = 0.75 * atr_now + 0.50 * distance_to_hvn
-            downside_distance = 0.60 * atr_now
-            direction = "upward"
-        else:
-            upside_distance = 0.75 * atr_now
-            downside_distance = 0.75 * atr_now
-            direction = "balanced"
-
-        # Apply CLV exhaustion skew in the reversion direction only.
-        skew = 0.0
-        if mean_reversion is not None:
-            if mean_reversion.get("direction") == "UPSIDE_REVERSION" and mean_reversion.get("status") in ["ELEVATED", "HIGH"]:
-                upside_distance *= 1.25
-                downside_distance *= 0.85
-                skew = 0.25
-            elif mean_reversion.get("direction") == "DOWNSIDE_REVERSION" and mean_reversion.get("status") in ["ELEVATED", "HIGH"]:
-                upside_distance *= 0.85
-                downside_distance *= 1.25
-                skew = -0.25
-
-        low = price - downside_distance
-        high = price + upside_distance
-
-        reason = (
-            f"Range-bound mean-reversion range skewed {direction}; "
-            f"HVN anchor {money0(nearest_hvn)}; "
-            f"stretch {mean_reversion.get('stretch_atr', 0):+.1f} ATR."
-            if mean_reversion is not None
-            else f"Range-bound mean-reversion range around HVN anchor {money0(nearest_hvn)}."
-        )
-
-        return {
-            "value": f"{money0(low)} to {money0(high)}",
-            "score": f"Skew {skew:.2f}",
-            "low": float(low),
-            "high": float(high),
-            "skew": float(skew),
-            "reason": reason
-        }
-
-    # Trending / default model: blended ATR/HVN envelope with CLV + volume skew.
-    atr_up_distance = atr_now
-    atr_down_distance = atr_now
-
-    if nearest_hvn_above is not None:
-        hvn_up_distance = max(nearest_hvn_above - price, 0)
-    else:
-        hvn_up_distance = atr_now * 1.50
-
-    if nearest_hvn_below is not None:
-        hvn_down_distance = max(price - nearest_hvn_below, 0)
-    else:
-        hvn_down_distance = atr_now * 1.50
-
-    base_up_distance = (0.65 * atr_up_distance) + (0.35 * hvn_up_distance)
-    base_down_distance = (0.65 * atr_down_distance) + (0.35 * hvn_down_distance)
-
-    skew = 0.0
-    skew_reasons = []
-
-    if clv_5 > 0.25:
-        skew += 0.25
-        skew_reasons.append("CLV favors upside")
-    elif clv_5 < -0.25:
-        skew -= 0.25
-        skew_reasons.append("CLV favors downside")
-    else:
-        skew_reasons.append("CLV mixed")
-
-    if volume_ratio > 1.20 and clv_5 > 0:
-        skew += 0.25
-        skew_reasons.append("volume confirms upside")
-    elif volume_ratio > 1.20 and clv_5 < 0:
-        skew -= 0.25
-        skew_reasons.append("volume confirms downside")
-    else:
-        skew_reasons.append("volume not strongly directional")
-
-    if skew > 0:
-        up_distance = base_up_distance * (1 + skew)
-        down_distance = base_down_distance * 0.85
-        reason = "Blended ATR/HVN range skewed upward; " + "; ".join(skew_reasons)
-    elif skew < 0:
-        up_distance = base_up_distance * 0.85
-        down_distance = base_down_distance * (1 + abs(skew))
-        reason = "Blended ATR/HVN range skewed downward; " + "; ".join(skew_reasons)
-    else:
-        up_distance = base_up_distance
-        down_distance = base_down_distance
-        reason = "Blended ATR/HVN range is balanced; " + "; ".join(skew_reasons)
-
-    low = price - down_distance
-    high = price + up_distance
-
-    return {
-        "value": f"{money0(low)} to {money0(high)}",
-        "score": f"Skew {skew:.2f}",
-        "low": float(low),
-        "high": float(high),
-        "skew": float(skew),
-        "reason": reason
-    }
-
-def expansion_potential_model(
-    df,
-    price,
-    atr_now,
-    clv_5,
-    hvn_distance_pct,
-    bias,
-    volume_ratio,
-    supply,
-    institutional,
-    relative_strength
-):
-    compression_ratio = atr_now / (df["ATR"].tail(20).mean() + 1e-9)
-
-    compressed = compression_ratio < 0.85
-    volume_expanding = volume_ratio > 1.20
-    clv_directional = abs(clv_5) > 0.35
-    leaving_balance = abs(hvn_distance_pct) > 1.00
-    institutional_support = institutional["value"] in ["MODERATE", "STRONG"]
-    supply_confirming_upside = (
-        supply["value"] in ["NEARING", "LIKELY"]
-        and bias["value"] == "BULLISH"
-    )
-    rs_support = relative_strength["value"] in ["STRONG", "POSITIVE"]
-
-    score_items = {
-        "compression": compressed,
-        "volume": volume_expanding,
-        "CLV": clv_directional,
-        "leaving HVN": leaving_balance,
-        "participation": institutional_support,
-        "supply": supply_confirming_upside,
-        "relative strength": rs_support
-    }
-
-    score_num = sum(score_items.values())
-
-    if score_num >= 6:
-        status = "HIGH"
-    elif score_num in [4, 5]:
-        status = "ELEVATED"
-    elif score_num in [2, 3]:
-        status = "WATCH"
-    else:
-        status = "LOW"
-
-    if bias["value"] == "BULLISH":
-        direction = "UPSIDE"
-    elif bias["value"] == "BEARISH":
-        direction = "DOWNSIDE"
-    else:
-        direction = "UNCONFIRMED"
-
-    expansion_move = atr_now * 1.5
-
-    passed = [k for k, v in score_items.items() if v]
-    failed = [k for k, v in score_items.items() if not v]
-
-    reason = (
-        f"Passed: {', '.join(passed) if passed else 'none'}; "
-        f"Missing: {', '.join(failed) if failed else 'none'}."
-    )
-
-    return {
-        "value": f"{status} / {direction}",
-        "status": status,
-        "direction": direction,
-        "score": f"{score_num}/7",
-        "expansion_move": float(expansion_move),
-        "upside_target": float(price + expansion_move),
-        "downside_target": float(price - expansion_move),
-        "reason": reason,
-        "score_items": score_items
-    }
-
-
-def discovery_state_model(df, hvns, price):
-    dominant_hvn = max(hvns, key=lambda h: h["volume"])
-    prior_value = dominant_hvn["price"]
-
-    closes = df["Close"]
-    volumes = df["Volume"]
-
-    if price > prior_value:
-        mask = closes > prior_value
-        direction = "above"
-    elif price < prior_value:
-        mask = closes < prior_value
-        direction = "below"
-    else:
-        mask = abs(closes - prior_value) / prior_value <= 0.01
-        direction = "near"
-
-    days = 0
-    for x in reversed(mask.tolist()):
-        if x:
-            days += 1
-        else:
-            break
-
-    accepted_pct = float((volumes[mask].sum() / (volumes.sum() + 1e-9)) * 100)
-
-    if direction == "above":
-        new_hvns = [h for h in hvns if h["price"] > prior_value]
-    elif direction == "below":
-        new_hvns = [h for h in hvns if h["price"] < prior_value]
-    else:
-        new_hvns = []
-
-    new_hvn_count = len(new_hvns)
-
-    score_num = (
-        min(days / 120 * 30, 30)
-        + min(accepted_pct / 50 * 40, 40)
-        + min(new_hvn_count / 5 * 30, 30)
-    )
-
-    if score_num >= 76:
-        value = "NEW_VALUE_ESTABLISHED"
-    elif score_num >= 51:
-        value = "ESTABLISHING_NEW_VALUE"
-    elif score_num >= 26:
-        value = "EARLY_DISCOVERY"
-    else:
-        value = "BALANCE"
-
-    if value == "BALANCE":
-        reason = "Price remains anchored to prior value."
-    else:
-        reason = f"{accepted_pct:.0f}% accepted volume; {new_hvn_count} new HVNs."
-
-    return {
-        "value": value,
-        "score": f"{score_num:.0f}/100",
-        "days": int(days),
-        "reason": reason,
-        "direction": direction
-    }
-
-
-def auction_model_base(raw_df, benchmark_df, hvn_window=252):
-    df = add_base_columns(raw_df)
-
-    price = float(df.iloc[-1]["Close"])
-
-    hvn_df = df.tail(hvn_window)
-    hvns = compute_hvns(hvn_df)
-
-    nearest_hvn, nearest_hvn_above, nearest_hvn_below = get_hvn_levels(hvns, price)
-
-    hvn_distance_pct = ((price - nearest_hvn) / nearest_hvn) * 100
-
-    if nearest_hvn_above is None and price > max(h["price"] for h in hvns):
-        hvn_status = "PRICE_DISCOVERY_ABOVE"
-    elif nearest_hvn_below is None and price < min(h["price"] for h in hvns):
-        hvn_status = "PRICE_DISCOVERY_BELOW"
-    elif abs(hvn_distance_pct) <= 1:
-        hvn_status = "IN_HVN"
-    elif abs(hvn_distance_pct) <= 3:
-        hvn_status = "NEARING_HVN"
-    else:
-        hvn_status = "AWAY_FROM_HVN"
-
-    clv_5 = df["CLV"].tail(5).mean()
-    clv_10 = df["CLV"].tail(10).mean()
-
-    volume_ratio = float(df.iloc[-1]["Volume_Ratio"])
-    atr_now = float(df.iloc[-1]["ATR"])
-
-    relative_strength = relative_strength_model(raw_df, benchmark_df, BENCHMARK_TICKER)
-
-    market_regime = market_regime_model(
-        df=df,
-        relative_strength=relative_strength,
-        hvn_distance_pct=hvn_distance_pct
-    )
-
-    institutional = institutional_participation_model(df)
-
-    supply = supply_exhaustion_model(
-        df=df,
-        clv_5=clv_5,
-        clv_10=clv_10,
-        price=price
-    )
-
-    mean_reversion = mean_reversion_model(
-        price=price,
-        nearest_hvn=nearest_hvn,
-        atr_now=atr_now,
-        clv_5=clv_5,
-        clv_10=clv_10,
-        hvn_distance_pct=hvn_distance_pct
-    )
-
-    bias = near_term_bias_model(
-        clv_5=clv_5,
-        volume_ratio=volume_ratio,
-        hvn_distance_pct=hvn_distance_pct,
-        supply=supply,
-        institutional=institutional,
-        relative_strength=relative_strength
-    )
-
-    # In range-bound regimes, direction-change signals should come from the
-    # mean-reversion engine rather than the trend/expansion engine.
-    if market_regime["value"] == "RANGE_BOUND" and mean_reversion["status"] in ["ELEVATED", "HIGH"]:
-        if mean_reversion["direction"] == "UPSIDE_REVERSION":
-            bias = {
-                "value": "BULLISH",
-                "score": mean_reversion["score"],
-                "reason": "Range-bound reversal: price stretched below HVN with CLV exhaustion."
-            }
-        elif mean_reversion["direction"] == "DOWNSIDE_REVERSION":
-            bias = {
-                "value": "BEARISH",
-                "score": mean_reversion["score"],
-                "reason": "Range-bound reversal: price stretched above HVN with CLV exhaustion."
-            }
-
-    expected_range = expected_auction_range_model(
-        price=price,
-        atr_now=atr_now,
-        clv_5=clv_5,
-        volume_ratio=volume_ratio,
-        nearest_hvn_above=nearest_hvn_above,
-        nearest_hvn_below=nearest_hvn_below,
-        market_regime=market_regime,
-        mean_reversion=mean_reversion,
-        nearest_hvn=nearest_hvn
-    )
-
-    expansion = expansion_potential_model(
-        df=df,
-        price=price,
-        atr_now=atr_now,
-        clv_5=clv_5,
-        hvn_distance_pct=hvn_distance_pct,
-        bias=bias,
-        volume_ratio=volume_ratio,
-        supply=supply,
-        institutional=institutional,
-        relative_strength=relative_strength
-    )
-
-    discovery = discovery_state_model(hvn_df, hvns, price)
-
-    return {
-        "ticker_price": price,
-        "last_bar_date": df.index[-1].date(),
-        "near_term_bias": bias,
-        "relative_strength": relative_strength,
-        "market_regime": market_regime,
-        "mean_reversion": mean_reversion,
-        "institutional_participation": institutional,
-        "expected_range": expected_range,
-        "hvn_analysis": {
-            "value": hvn_status,
-            "score": f"{hvn_distance_pct:.2f}%",
-            "reason": "Current price versus nearest accepted value area."
-        },
-        "supply_exhaustion": supply,
-        "expansion_potential": expansion,
-        "discovery_state": discovery,
-        "nearest_hvn": nearest_hvn,
-        "nearest_hvn_above": nearest_hvn_above,
-        "nearest_hvn_below": nearest_hvn_below,
-        "hvn_distance_pct": hvn_distance_pct
-    }
-
-
-def count_streak(states):
-    if not states:
-        return ""
-
-    current = states[-1]
-    streak = 0
-
-    for s in reversed(states):
-        if s == current:
-            streak += 1
-        else:
-            break
-
-    return streak
-
-
-def compute_streaks(raw_df, benchmark_df, lookback=20):
-    states = {
-        "near_term_bias": [],
-        "market_regime": [],
-        "institutional_participation": [],
-        "supply_exhaustion": [],
-        "expansion_potential": []
-    }
-
-    start = max(120, len(raw_df) - lookback)
-
-    for i in range(start, len(raw_df) + 1):
-        try:
-            partial_stock = raw_df.iloc[:i].copy()
-            last_date = partial_stock.index[-1]
-            partial_benchmark = benchmark_df[benchmark_df.index <= last_date].copy()
-
-            r = auction_model_base(partial_stock, partial_benchmark)
-
-            states["near_term_bias"].append(r["near_term_bias"]["value"])
-            states["market_regime"].append(r["market_regime"]["value"])
-            states["institutional_participation"].append(r["institutional_participation"]["value"])
-            states["supply_exhaustion"].append(r["supply_exhaustion"]["value"])
-            states["expansion_potential"].append(r["expansion_potential"]["status"])
-        except Exception:
-            continue
-
-    return {k: count_streak(v) for k, v in states.items()}
-
-
-def auction_model(raw_df, benchmark_df):
-    result = auction_model_base(raw_df, benchmark_df)
-    streaks = compute_streaks(raw_df, benchmark_df, lookback=20)
-
-    result["near_term_bias"]["days"] = streaks["near_term_bias"]
-    result["market_regime"]["days"] = streaks["market_regime"]
-    result["institutional_participation"]["days"] = streaks["institutional_participation"]
-    result["supply_exhaustion"]["days"] = streaks["supply_exhaustion"]
-    result["expansion_potential"]["days"] = streaks["expansion_potential"]
-
-    return result
-
-
-def price_impact_for_row(attribute, result):
-    if attribute == "5-day auction range":
-        skew = result["expected_range"]["skew"]
-        if skew > 0:
-            return "+"
-        elif skew < 0:
-            return "-"
-        return "="
-
-    if attribute == "Relative strength":
-        return result["relative_strength"]["price_impact"]
-
-    if attribute == "Market regime":
-        return result["market_regime"].get("price_impact", "=")
-
-
-    if attribute == "Mean reversion potential":
-        return result.get("mean_reversion", {}).get("price_impact", "=")
-
-    if attribute == "Institutional participation":
-        value = result["institutional_participation"]["value"]
-        bias = result["near_term_bias"]["value"]
-
-        if value in ["MODERATE", "STRONG"] and bias == "BULLISH":
-            return "+"
-        elif value in ["MODERATE", "STRONG"] and bias == "BEARISH":
-            return "-"
-        return "="
-
-    if attribute == "Supply exhaustion":
-        if result["supply_exhaustion"]["value"] in ["NEARING", "LIKELY"]:
-            return "+"
-        return "="
-
-    if attribute == "Expansion potential":
-        status = result["expansion_potential"]["status"]
-        direction = result["expansion_potential"]["direction"]
-
-        if status in ["WATCH", "ELEVATED", "HIGH"] and direction == "UPSIDE":
-            return "+"
-        elif status in ["WATCH", "ELEVATED", "HIGH"] and direction == "DOWNSIDE":
-            return "-"
-        return "="
-
-    if attribute == "Discovery state":
-        value = result["discovery_state"]["value"]
-        direction = result["discovery_state"]["direction"]
-
-        if value in ["ESTABLISHING_NEW_VALUE", "NEW_VALUE_ESTABLISHED"] and direction == "above":
-            return "+"
-        elif value in ["ESTABLISHING_NEW_VALUE", "NEW_VALUE_ESTABLISHED"] and direction == "below":
-            return "-"
-        return "="
-
-    if attribute == "HVN status":
-        value = result["hvn_analysis"]["value"]
-
-        if value == "PRICE_DISCOVERY_ABOVE":
-            return "+"
-        elif value == "PRICE_DISCOVERY_BELOW":
-            return "-"
-        return "="
-
-    return ""
-
-
-def make_summary_table(result):
-    rows = [
-        [
-            "Near-term bias",
-            result["near_term_bias"]["value"],
-            result["near_term_bias"]["score"],
-            result["near_term_bias"]["days"],
-            "",
-            result["near_term_bias"]["reason"]
-        ],
-        [
-            "5-day auction range",
-            result["expected_range"]["value"],
-            result["expected_range"]["score"],
-            "",
-            price_impact_for_row("5-day auction range", result),
-            result["expected_range"]["reason"]
-        ],
-        [
-            "Relative strength",
-            result["relative_strength"]["value"],
-            result["relative_strength"]["score"],
-            result["relative_strength"]["days"],
-            price_impact_for_row("Relative strength", result),
-            result["relative_strength"]["reason"]
-        ],
-        [
-            "Market regime",
-            result["market_regime"]["value"],
-            result["market_regime"]["score"],
-            result["market_regime"].get("days", ""),
-            price_impact_for_row("Market regime", result),
-            result["market_regime"]["reason"]
-        ],
-        [
-            "Mean reversion potential",
-            result["mean_reversion"]["value"],
-            result["mean_reversion"]["score"],
-            "",
-            price_impact_for_row("Mean reversion potential", result),
-            result["mean_reversion"]["reason"]
-        ],
-        [
-            "Institutional participation",
-            result["institutional_participation"]["value"],
-            result["institutional_participation"]["score"],
-            result["institutional_participation"]["days"],
-            price_impact_for_row("Institutional participation", result),
-            result["institutional_participation"]["reason"]
-        ],
-        [
-            "Supply exhaustion",
-            result["supply_exhaustion"]["value"],
-            result["supply_exhaustion"]["score"],
-            result["supply_exhaustion"]["days"],
-            price_impact_for_row("Supply exhaustion", result),
-            result["supply_exhaustion"]["reason"]
-        ],
-        [
-            "Expansion potential",
-            result["expansion_potential"]["value"],
-            result["expansion_potential"]["score"],
-            result["expansion_potential"]["days"],
-            price_impact_for_row("Expansion potential", result),
-            result["expansion_potential"]["reason"]
-        ],
-        [
-            "Discovery state",
-            result["discovery_state"]["value"],
-            result["discovery_state"]["score"],
-            result["discovery_state"]["days"],
-            price_impact_for_row("Discovery state", result),
-            result["discovery_state"]["reason"]
-        ],
-        [
-            "HVN status",
-            result["hvn_analysis"]["value"],
-            result["hvn_analysis"]["score"],
-            "",
-            price_impact_for_row("HVN status", result),
-            result["hvn_analysis"]["reason"]
-        ],
-        [
-            "HVNs nearest",
-            f"{money0(result['nearest_hvn_below'])} to {money0(result['nearest_hvn_above'])}",
-            "",
-            "",
-            "",
-            "Nearest current-acceptance value areas."
-        ],
-        [
-            "1.5x ATR expansion levels",
-            f"{money0(result['expansion_potential']['downside_target'])} to {money0(result['expansion_potential']['upside_target'])}",
-            money0(result["expansion_potential"]["expansion_move"]),
-            "",
-            "",
-            "Reference levels for a 1.5x ATR move."
-        ]
-    ]
-
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "Attribute",
-            "Value",
-            "Score",
-            "Days",
-            "Price impact",
-            "Reason"
-        ]
-    )
-
+def pct1(x):
+    if x is None or pd.isna(x):
+        return "N/A"
+    return f"{x:.1f}%"
 
 
 def normalize_ohlcv_columns(data, ticker=None):
@@ -1161,618 +36,580 @@ def normalize_ohlcv_columns(data, ticker=None):
     if isinstance(data.columns, pd.MultiIndex):
         required = {"Open", "High", "Low", "Close", "Volume"}
         level0 = set(map(str, data.columns.get_level_values(0)))
-        level_last = set(map(str, data.columns.get_level_values(-1)))
+        levellast = set(map(str, data.columns.get_level_values(-1)))
 
         if required.issubset(level0):
             data.columns = data.columns.get_level_values(0)
-        elif required.issubset(level_last):
+        elif required.issubset(levellast):
             data.columns = data.columns.get_level_values(-1)
         elif ticker is not None:
             ticker_upper = str(ticker).upper()
             for level in range(data.columns.nlevels):
                 labels = [str(x).upper() for x in data.columns.get_level_values(level)]
                 if ticker_upper in labels:
-                    try:
-                        data = data.xs(
-                            key=data.columns.get_level_values(level)[labels.index(ticker_upper)],
-                            axis=1,
-                            level=level
-                        )
-                    except Exception:
-                        pass
+                    key = data.columns.get_level_values(level)[labels.index(ticker_upper)]
+                    data = data.xs(key=key, axis=1, level=level)
                     break
 
     data = data.loc[:, ~data.columns.duplicated()]
-
     required_cols = ["Open", "High", "Low", "Close", "Volume"]
     missing = [c for c in required_cols if c not in data.columns]
     if missing:
-        raise ValueError(f"Downloaded data is missing columns: {missing}")
+        raise ValueError(f"Downloaded data for {ticker or 'ticker'} is missing columns: {missing}")
 
-    return data[required_cols].dropna()
+    out = data[required_cols].dropna()
+    out.index = pd.to_datetime(out.index).tz_localize(None)
+    return out
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def download_ohlcv(ticker):
+def download_ohlcv(ticker: str, period: str):
     ticker = str(ticker).strip().upper()
-
-    data = yf.download(
+    raw = yf.download(
         ticker,
-        period="2y",
+        period=period,
         interval="1d",
         auto_adjust=False,
         progress=False,
-        threads=False
+        threads=False,
+    )
+    return normalize_ohlcv_columns(raw, ticker=ticker)
+
+
+# ----------------------------
+# Core calculations
+# ----------------------------
+
+
+def clv(df):
+    return ((df["Close"] - df["Low"]) - (df["High"] - df["Close"])) / (
+        df["High"] - df["Low"] + 1e-9
     )
 
-    return normalize_ohlcv_columns(data, ticker=ticker)
+
+def atr(df, period=20):
+    high_low = df["High"] - df["Low"]
+    high_close = (df["High"] - df["Close"].shift()).abs()
+    low_close = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
 
-def render_summary_table(summary_table):
-    """Render a readable table with wrapped Reason text for Streamlit."""
-    df = summary_table.fillna("").copy()
+def rolling_percentile_rank(series: pd.Series, window: int) -> pd.Series:
+    """Percentile rank of latest value within each rolling window, 0-100."""
+    def _rank(x):
+        s = pd.Series(x)
+        return s.rank(pct=True).iloc[-1] * 100
 
-    st.markdown(
-        """
-        <style>
-        .apm-table-wrap {
-            width: 100%;
-            overflow-x: auto;
-            border: 1px solid rgba(250, 250, 250, 0.15);
-            border-radius: 8px;
-        }
-        table.apm-table {
-            width: 100%;
-            border-collapse: collapse;
-            table-layout: fixed;
-            font-size: 0.92rem;
-        }
-        table.apm-table th, table.apm-table td {
-            border-bottom: 1px solid rgba(250, 250, 250, 0.12);
-            padding: 0.55rem 0.65rem;
-            vertical-align: top;
-            white-space: normal;
-            word-break: break-word;
-        }
-        table.apm-table th {
-            font-weight: 700;
-            text-align: left;
-            background: rgba(128, 128, 128, 0.16);
-        }
-        table.apm-table th:nth-child(1), table.apm-table td:nth-child(1) { width: 14%; }
-        table.apm-table th:nth-child(2), table.apm-table td:nth-child(2) { width: 15%; }
-        table.apm-table th:nth-child(3), table.apm-table td:nth-child(3) { width: 8%; }
-        table.apm-table th:nth-child(4), table.apm-table td:nth-child(4) { width: 7%; text-align: center; }
-        table.apm-table th:nth-child(5), table.apm-table td:nth-child(5) { width: 8%; text-align: center; font-weight: 700; }
-        table.apm-table th:nth-child(6), table.apm-table td:nth-child(6) { width: 48%; }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-    html_rows = []
-    for _, row in df.iterrows():
-        cells = []
-        for col in df.columns:
-            cells.append(f"<td>{html.escape(str(row[col]))}</td>")
-        html_rows.append("<tr>" + "".join(cells) + "</tr>")
-
-    header = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
-    table_html = (
-        '<div class="apm-table-wrap">'
-        '<table class="apm-table">'
-        f'<thead><tr>{header}</tr></thead>'
-        f'<tbody>{"".join(html_rows)}</tbody>'
-        '</table>'
-        '</div>'
-    )
-    st.markdown(table_html, unsafe_allow_html=True)
+    return series.rolling(window, min_periods=max(30, window // 3)).apply(_rank, raw=False)
 
 
-def build_chart(df, result, ticker):
-    expansion = result["expansion_potential"]
+def add_profile_columns(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    df = df.copy()
+    df["CLV"] = clv(df)
+    df["CLV_5"] = df["CLV"].rolling(5).mean()
+    df["CLV_20"] = df["CLV"].rolling(20).mean()
+    df["CLV_Trend"] = df["CLV_5"] - df["CLV_20"]
 
-    fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(df.index, df["Close"], linewidth=2, label="Close")
+    df["ATR20"] = atr(df, 20)
+    df["ATR20_PctPrice"] = df["ATR20"] / (df["Close"] + 1e-9)
 
-    ax.axhline(
-        result["nearest_hvn"],
-        color="orange",
-        linestyle="--",
-        linewidth=2,
-        label=f'Nearest HVN {money0(result["nearest_hvn"])}'
-    )
+    # Volatility percentile is high when ATR/price is high.
+    # Compression percentile is inverse: high means unusually compressed.
+    df["Volatility_Percentile"] = rolling_percentile_rank(df["ATR20_PctPrice"], 252)
+    df["Compression_Percentile"] = 100 - df["Volatility_Percentile"]
 
-    if result["nearest_hvn_above"] is not None:
-        ax.axhline(
-            result["nearest_hvn_above"],
-            color="green",
-            linestyle="-.",
-            linewidth=2,
-            label=f'HVN Above {money0(result["nearest_hvn_above"])}'
+    df["Volume_20_Mean"] = df["Volume"].rolling(20).mean()
+    df["Volume_Ratio"] = df["Volume"] / (df["Volume_20_Mean"] + 1e-9)
+
+    df["Future_Close_5D"] = df["Close"].shift(-5)
+    df["Forward_Return_5D"] = (df["Future_Close_5D"] / df["Close"] - 1) * 100
+
+    if benchmark_df is not None and not benchmark_df.empty:
+        aligned = df[["Close"]].rename(columns={"Close": "Stock_Close"}).join(
+            benchmark_df[["Close"]].rename(columns={"Close": "Benchmark_Close"}),
+            how="left",
         )
+        stock_60 = aligned["Stock_Close"].pct_change(60)
+        bench_60 = aligned["Benchmark_Close"].pct_change(60)
+        stock_20 = aligned["Stock_Close"].pct_change(20)
+        bench_20 = aligned["Benchmark_Close"].pct_change(20)
+        df["RS_60"] = (stock_60 - bench_60) * 100
+        df["RS_20"] = (stock_20 - bench_20) * 100
+    else:
+        df["RS_60"] = np.nan
+        df["RS_20"] = np.nan
 
-    if result["nearest_hvn_below"] is not None:
-        ax.axhline(
-            result["nearest_hvn_below"],
-            color="red",
-            linestyle="-.",
-            linewidth=2,
-            label=f'HVN Below {money0(result["nearest_hvn_below"])}'
-        )
+    return df
 
-    ax.axhline(
-        result["expected_range"]["low"],
-        color="red",
-        linestyle=":",
-        linewidth=2,
-        label=f'5D Auction Low {money0(result["expected_range"]["low"])}'
+
+# ----------------------------
+# HVN engine
+# ----------------------------
+
+
+def compute_hvns(df, bins=140, top_nodes=20, decay_days=180):
+    if df.empty:
+        return []
+
+    min_price = df["Low"].min()
+    max_price = df["High"].max()
+    if not np.isfinite(min_price) or not np.isfinite(max_price) or max_price <= min_price:
+        return []
+
+    bin_edges = np.linspace(min_price, max_price, bins + 1)
+    volume_profile = np.zeros(bins)
+    latest_date = df.index[-1]
+
+    for date, row in df.iterrows():
+        low = float(row["Low"])
+        high = float(row["High"])
+        volume = float(row["Volume"])
+
+        if high <= low or volume <= 0:
+            continue
+
+        age_days = max((latest_date - date).days, 0)
+        weighted_volume = volume * np.exp(-age_days / decay_days)
+
+        touched_bins = np.where((bin_edges[:-1] <= high) & (bin_edges[1:] >= low))[0]
+        if len(touched_bins) == 0:
+            continue
+
+        volume_profile[touched_bins] += weighted_volume / len(touched_bins)
+
+    peaks = []
+    for i in range(1, len(volume_profile) - 1):
+        if volume_profile[i] > volume_profile[i - 1] and volume_profile[i] > volume_profile[i + 1]:
+            peaks.append(
+                {
+                    "rank": None,
+                    "price": float((bin_edges[i] + bin_edges[i + 1]) / 2),
+                    "weighted_volume": float(volume_profile[i]),
+                }
+            )
+
+    if not peaks:
+        for idx in np.argsort(volume_profile)[::-1][:top_nodes]:
+            peaks.append(
+                {
+                    "rank": None,
+                    "price": float((bin_edges[idx] + bin_edges[idx + 1]) / 2),
+                    "weighted_volume": float(volume_profile[idx]),
+                }
+            )
+
+    ranked = sorted(peaks, key=lambda x: x["weighted_volume"], reverse=True)[:top_nodes]
+    for i, item in enumerate(ranked, start=1):
+        item["rank"] = i
+
+    return sorted(ranked, key=lambda x: x["rank"])
+
+
+# ----------------------------
+# Similar setup scan
+# ----------------------------
+
+
+def state_label(value: float, kind: str) -> str:
+    if pd.isna(value):
+        return "N/A"
+    if kind == "clv":
+        if value > 0.10:
+            return "Bullish"
+        if value < -0.10:
+            return "Bearish"
+        return "Neutral"
+    if kind == "volume":
+        if value >= 1.20:
+            return "Supportive"
+        if value <= 0.80:
+            return "Weak"
+        return "Neutral"
+    if kind == "rs":
+        if value >= 10:
+            return "Strong"
+        if value >= 3:
+            return "Positive"
+        if value <= -10:
+            return "Weak"
+        if value <= -3:
+            return "Negative"
+        return "Neutral"
+    return "N/A"
+
+
+def scan_similar_setups(
+    df: pd.DataFrame,
+    compression_tolerance_pp: float,
+    selected_filters: List[str],
+    clv_tolerance: float,
+    volume_tolerance_pct: float,
+    rs_tolerance_pp: float,
+) -> pd.DataFrame:
+    clean = df.dropna(
+        subset=[
+            "Compression_Percentile",
+            "CLV_Trend",
+            "Volume_Ratio",
+            "RS_60",
+            "Future_Close_5D",
+            "Forward_Return_5D",
+        ]
+    ).copy()
+
+    if clean.empty:
+        return pd.DataFrame()
+
+    current = clean.iloc[-1]
+    current_date = clean.index[-1]
+
+    # Exclude current row from historical analogs. Also Future_Close_5D dropna already removes last five bars.
+    candidates = clean[clean.index < current_date].copy()
+
+    mask = (candidates["Compression_Percentile"] - current["Compression_Percentile"]).abs() <= compression_tolerance_pp
+
+    if "CLV trend" in selected_filters:
+        mask &= (candidates["CLV_Trend"] - current["CLV_Trend"]).abs() <= clv_tolerance
+
+    if "Volume support" in selected_filters:
+        current_vol = current["Volume_Ratio"]
+        vol_tol = volume_tolerance_pct / 100
+        low = current_vol * (1 - vol_tol)
+        high = current_vol * (1 + vol_tol)
+        mask &= candidates["Volume_Ratio"].between(low, high)
+
+    if "Relative strength" in selected_filters:
+        mask &= (candidates["RS_60"] - current["RS_60"]).abs() <= rs_tolerance_pp
+
+    out = candidates.loc[mask].copy()
+    if out.empty:
+        return pd.DataFrame()
+
+    out = out.reset_index().rename(columns={"index": "Date"})
+    out["Date"] = pd.to_datetime(out["Date"]).dt.date
+    out["Close"] = out["Close"].round(2)
+    out["Future_Close_5D"] = out["Future_Close_5D"].round(2)
+    out["Forward_Return_5D"] = out["Forward_Return_5D"].round(2)
+    out["Compression_Percentile"] = out["Compression_Percentile"].round(1)
+    out["CLV_Trend"] = out["CLV_Trend"].round(3)
+    out["Volume_Ratio"] = out["Volume_Ratio"].round(2)
+    out["RS_60"] = out["RS_60"].round(1)
+
+    return out[
+        [
+            "Date",
+            "Close",
+            "Future_Close_5D",
+            "Forward_Return_5D",
+            "Compression_Percentile",
+            "CLV_Trend",
+            "Volume_Ratio",
+            "RS_60",
+        ]
+    ]
+
+
+# ----------------------------
+# Profile builder
+# ----------------------------
+
+
+def build_profile(
+    ticker: str,
+    benchmark_df: pd.DataFrame,
+    benchmark_name: str,
+    period: str,
+    compression_tolerance_pp: float,
+    selected_filters: List[str],
+    clv_tolerance: float,
+    volume_tolerance_pct: float,
+    rs_tolerance_pp: float,
+):
+    raw = download_ohlcv(ticker, period)
+    if raw.empty:
+        raise ValueError(f"No data returned for {ticker}.")
+    if len(raw) < 320:
+        raise ValueError(f"{ticker} needs at least ~320 daily bars for percentile-based setup scanning.")
+
+    df = add_profile_columns(raw, benchmark_df)
+    df = df.dropna(subset=["Compression_Percentile", "CLV_Trend", "Volume_Ratio"])
+
+    hvns = compute_hvns(df.tail(504), top_nodes=20)
+    analogs = scan_similar_setups(
+        df,
+        compression_tolerance_pp=compression_tolerance_pp,
+        selected_filters=selected_filters,
+        clv_tolerance=clv_tolerance,
+        volume_tolerance_pct=volume_tolerance_pct,
+        rs_tolerance_pp=rs_tolerance_pp,
     )
 
-    ax.axhline(
-        result["expected_range"]["high"],
-        color="green",
-        linestyle=":",
-        linewidth=2,
-        label=f'5D Auction High {money0(result["expected_range"]["high"])}'
-    )
+    latest = df.iloc[-1]
+    rs_value = float(latest.get("RS_60", np.nan))
+    volume_ratio = float(latest["Volume_Ratio"])
+    clv_trend = float(latest["CLV_Trend"])
+    compression_pct = float(latest["Compression_Percentile"])
 
-    ax.axhline(
-        expansion["upside_target"],
-        color="green",
-        linestyle="--",
-        linewidth=1,
-        alpha=0.45,
-        label=f'1.5x ATR Upside {money0(expansion["upside_target"])}'
-    )
+    metrics = {
+        "Ticker": ticker.upper(),
+        "Last data bar": str(df.index[-1].date()),
+        "Current price": money0(float(latest["Close"])),
+        "20D compression percentile": pct1(compression_pct),
+        "CLV trend": f"{clv_trend:+.3f} ({state_label(clv_trend, 'clv')})",
+        "Volume support": f"{volume_ratio:.2f}x 20D avg ({state_label(volume_ratio, 'volume')})",
+        f"Relative strength vs {benchmark_name}": f"{rs_value:+.1f}% over 60D ({state_label(rs_value, 'rs')})",
+        "Historical setup count": len(analogs),
+    }
 
-    ax.axhline(
-        expansion["downside_target"],
-        color="red",
-        linestyle="--",
-        linewidth=1,
-        alpha=0.45,
-        label=f'1.5x ATR Downside {money0(expansion["downside_target"])}'
-    )
+    return {
+        "ticker": ticker.upper(),
+        "df": df,
+        "hvns": hvns,
+        "analogs": analogs,
+        "metrics": metrics,
+    }
 
-    ax.set_title(f"{ticker} Auction Pressure Model")
+
+# ----------------------------
+# Rendering
+# ----------------------------
+
+
+def render_metrics(profile):
+    m = profile["metrics"]
+    st.markdown(f"### {profile['ticker']}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Current price", m["Current price"])
+    c2.metric("Compression", m["20D compression percentile"])
+    c3.metric("Analog count", m["Historical setup count"])
+    c4.metric("Last bar", m["Last data bar"])
+
+    details = pd.DataFrame(
+        [
+            ["CLV trend", m["CLV trend"]],
+            ["Volume support", m["Volume support"]],
+            [k for k in m.keys() if k.startswith("Relative strength")][0:1] + [None],
+        ]
+    )
+    rs_key = [k for k in m.keys() if k.startswith("Relative strength")][0]
+    details = pd.DataFrame(
+        [
+            ["CLV trend", m["CLV trend"]],
+            ["Volume support", m["Volume support"]],
+            [rs_key, m[rs_key]],
+        ],
+        columns=["Metric", "Value"],
+    )
+    st.dataframe(details, use_container_width=True, hide_index=True)
+
+
+def build_hvn_chart(profile):
+    df = profile["df"]
+    hvns = profile["hvns"]
+    ticker = profile["ticker"]
+
+    fig, ax = plt.subplots(figsize=(13, 5.8))
+    ax.plot(df.index, df["Close"], linewidth=1.8, label="Close")
+
+    # Plot all top 20 HVNs. Label only top 8 to keep legend usable.
+    for h in hvns:
+        rank = h["rank"]
+        price = h["price"]
+        alpha = max(0.20, 0.95 - (rank - 1) * 0.035)
+        lw = 2.2 if rank <= 5 else 1.0
+        label = f"HVN #{rank}: {money0(price)}" if rank <= 8 else None
+        ax.axhline(price, linestyle="--", linewidth=lw, alpha=alpha, label=label)
+
+    ax.set_title(f"{ticker}: Top 20 HVNs on Price-Time Chart")
     ax.set_xlabel("Date")
     ax.set_ylabel("Price")
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def build_analog_chart(profile):
+    analogs = profile["analogs"]
+    ticker = profile["ticker"]
+    latest_close = float(profile["df"].iloc[-1]["Close"])
+
+    fig, ax = plt.subplots(figsize=(13, 4.8))
+
+    if analogs.empty:
+        ax.text(0.5, 0.5, "No historical analogs found", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return fig
+
+    chart_df = analogs.copy()
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"])
+    ax.scatter(chart_df["Date"], chart_df["Future_Close_5D"], s=38, label="Close 5 trading days later")
+    ax.plot(chart_df["Date"], chart_df["Future_Close_5D"], alpha=0.35)
+    ax.axhline(latest_close, linestyle="--", linewidth=1.5, label=f"Current close {money0(latest_close)}")
+    ax.set_title(f"{ticker}: Historical Similar Compression Setups — Price 5 Days Later")
+    ax.set_xlabel("Analog Date")
+    ax.set_ylabel("Share Price 5 Days Later")
+    ax.grid(True, alpha=0.25)
     ax.legend(loc="best")
     fig.tight_layout()
     return fig
 
 
+def render_profile(profile):
+    render_metrics(profile)
+
+    tab1, tab2, tab3 = st.tabs(["HVN chart", "Similar setup outcomes", "Data tables"])
+
+    with tab1:
+        fig = build_hvn_chart(profile)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+        hvn_table = pd.DataFrame(profile["hvns"])
+        if not hvn_table.empty:
+            hvn_table["price"] = hvn_table["price"].map(lambda x: f"${x:,.2f}")
+            hvn_table["weighted_volume"] = hvn_table["weighted_volume"].map(lambda x: f"{x:,.0f}")
+            st.dataframe(hvn_table, use_container_width=True, hide_index=True)
+
+    with tab2:
+        analogs = profile["analogs"]
+        fig = build_analog_chart(profile)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+        if not analogs.empty:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Analog count", len(analogs))
+            c2.metric("Avg 5D return", f"{analogs['Forward_Return_5D'].mean():+.2f}%")
+            c3.metric("Median 5D return", f"{analogs['Forward_Return_5D'].median():+.2f}%")
+            c4.metric("Win rate", f"{(analogs['Forward_Return_5D'] > 0).mean() * 100:.1f}%")
+
+            st.dataframe(analogs, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download similar setup results",
+                data=analogs.to_csv(index=False),
+                file_name=f"{profile['ticker']}_similar_setups.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("No similar historical setup was found with the current filters. Try widening the tolerance or removing an optional filter.")
+
+    with tab3:
+        st.caption("Current-state metrics")
+        metrics_df = pd.DataFrame(profile["metrics"].items(), columns=["Metric", "Value"])
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
 
-def evaluate_signal_accuracy(signal_row, future_df, neutral_band=0.01):
-    entry_price = signal_row["entry_price"]
-    future_close = float(future_df["Close"].iloc[-1])
-    future_high = float(future_df["High"].max())
-    future_low = float(future_df["Low"].min())
-    forward_return = (future_close / entry_price) - 1
-
-    bias = signal_row["near_term_bias"]
-    if bias == "BULLISH":
-        bias_correct = forward_return > 0
-    elif bias == "BEARISH":
-        bias_correct = forward_return < 0
-    else:
-        bias_correct = abs(forward_return) <= neutral_band
-
-    directional_scored = bias in ["BULLISH", "BEARISH"]
-
-    range_low = signal_row["range_low"]
-    range_high = signal_row["range_high"]
-    range_close_hit = range_low <= future_close <= range_high
-    range_full_hit = future_low >= range_low and future_high <= range_high
-
-    expansion_status = signal_row["expansion_status"]
-    expansion_direction = signal_row["expansion_direction"]
-    expansion_scored = expansion_status in ["WATCH", "ELEVATED", "HIGH"]
-
-    if not expansion_scored:
-        expansion_hit = None
-    elif expansion_direction == "UPSIDE":
-        expansion_hit = future_high >= signal_row["expansion_upside"]
-    elif expansion_direction == "DOWNSIDE":
-        expansion_hit = future_low <= signal_row["expansion_downside"]
-    else:
-        expansion_hit = (
-            future_high >= signal_row["expansion_upside"]
-            or future_low <= signal_row["expansion_downside"]
-        )
-
-    return {
-        "forward_close": future_close,
-        "forward_high": future_high,
-        "forward_low": future_low,
-        "forward_5d_return_%": forward_return * 100,
-        "bias_correct": bool(bias_correct),
-        "directional_scored": bool(directional_scored),
-        "range_close_hit": bool(range_close_hit),
-        "range_full_hit": bool(range_full_hit),
-        "expansion_scored": bool(expansion_scored),
-        "expansion_hit": expansion_hit,
-    }
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def run_backtest_cached(stock_df, benchmark_df, lookback_days=80, horizon_days=5):
-    records = []
-
-    min_history = 140
-    if len(stock_df) < min_history + horizon_days + 1:
-        return pd.DataFrame()
-
-    start_idx = max(min_history, len(stock_df) - lookback_days - horizon_days)
-    end_idx = len(stock_df) - horizon_days
-
-    for i in range(start_idx, end_idx):
-        try:
-            signal_df = stock_df.iloc[:i].copy()
-            future_df = stock_df.iloc[i:i + horizon_days].copy()
-            signal_date = signal_df.index[-1]
-
-            partial_benchmark = benchmark_df[benchmark_df.index <= signal_date].copy()
-            if len(partial_benchmark) < min_history:
-                continue
-
-            result = auction_model_base(signal_df, partial_benchmark)
-
-            row = {
-                "signal_date": signal_date.date(),
-                "entry_price": float(result["ticker_price"]),
-                "near_term_bias": result["near_term_bias"]["value"],
-                "bias_score": result["near_term_bias"]["score"],
-                "range_low": float(result["expected_range"]["low"]),
-                "range_high": float(result["expected_range"]["high"]),
-                "relative_strength": result["relative_strength"]["value"],
-                "market_regime": result["market_regime"]["value"],
-                "institutional_participation": result["institutional_participation"]["value"],
-                "supply_exhaustion": result["supply_exhaustion"]["value"],
-                "expansion_status": result["expansion_potential"]["status"],
-                "expansion_direction": result["expansion_potential"]["direction"],
-                "expansion_upside": float(result["expansion_potential"]["upside_target"]),
-                "expansion_downside": float(result["expansion_potential"]["downside_target"]),
-                "discovery_state": result["discovery_state"]["value"],
+def compare_profiles_table(profiles: List[dict]) -> pd.DataFrame:
+    rows = []
+    for p in profiles:
+        m = p["metrics"]
+        rs_key = [k for k in m.keys() if k.startswith("Relative strength")][0]
+        analogs = p["analogs"]
+        rows.append(
+            {
+                "Ticker": p["ticker"],
+                "Current price": m["Current price"],
+                "Compression": m["20D compression percentile"],
+                "CLV trend": m["CLV trend"],
+                "Volume support": m["Volume support"],
+                "Relative strength": m[rs_key],
+                "Analog count": len(analogs),
+                "Avg 5D return": "N/A" if analogs.empty else f"{analogs['Forward_Return_5D'].mean():+.2f}%",
+                "Median 5D return": "N/A" if analogs.empty else f"{analogs['Forward_Return_5D'].median():+.2f}%",
+                "Win rate": "N/A" if analogs.empty else f"{(analogs['Forward_Return_5D'] > 0).mean() * 100:.1f}%",
             }
-
-            outcome = evaluate_signal_accuracy(row, future_df, neutral_band=0.01)
-            row.update(outcome)
-            records.append(row)
-        except Exception:
-            continue
-
-    return pd.DataFrame(records)
-
-
-def pct_text(value):
-    if value is None or pd.isna(value):
-        return "n/a"
-    return f"{value * 100:.0f}%"
-
-
-def render_backtest_dashboard(backtest_df, ticker, horizon_days=5):
-    st.subheader("Backtest Dashboard")
-
-    if backtest_df.empty:
-        st.warning("Not enough valid historical signals to backtest this ticker.")
-        return
-
-    n = len(backtest_df)
-
-    directional = backtest_df[backtest_df["directional_scored"]]
-    directional_accuracy = directional["bias_correct"].mean() if len(directional) else np.nan
-
-    all_bias_accuracy = backtest_df["bias_correct"].mean()
-    range_close_hit = backtest_df["range_close_hit"].mean()
-    range_full_hit = backtest_df["range_full_hit"].mean()
-
-    expansion = backtest_df[backtest_df["expansion_scored"]].copy()
-    expansion_hit_rate = expansion["expansion_hit"].mean() if len(expansion) else np.nan
-
-    avg_forward_return = backtest_df["forward_5d_return_%"].mean()
-    median_forward_return = backtest_df["forward_5d_return_%"].median()
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Signals tested", f"{n}")
-    c2.metric("Directional accuracy", pct_text(directional_accuracy))
-    c3.metric("Range close hit", pct_text(range_close_hit))
-    c4.metric("Range full containment", pct_text(range_full_hit))
-    c5.metric("Expansion hit rate", pct_text(expansion_hit_rate))
-
-    st.caption(
-        "Directional accuracy scores BULLISH/BEARISH calls against the next 5-day close direction. "
-        "Range close hit checks whether the next 5-day close landed inside the model range. "
-        "Full containment checks whether the entire next 5-day high-low path stayed inside the range."
-    )
-
-    accuracy_rows = [
-        {
-            "Measure": "Directional accuracy",
-            "Result": pct_text(directional_accuracy),
-            "Sample": len(directional),
-            "Definition": "BULLISH correct if next 5-day close is higher; BEARISH correct if lower."
-        },
-        {
-            "Measure": "All bias accuracy",
-            "Result": pct_text(all_bias_accuracy),
-            "Sample": n,
-            "Definition": "Includes NEUTRAL as correct only when next 5-day return is within +/-1%."
-        },
-        {
-            "Measure": "5-day range close hit",
-            "Result": pct_text(range_close_hit),
-            "Sample": n,
-            "Definition": "Next 5-day close finished inside the auction range."
-        },
-        {
-            "Measure": "5-day range full containment",
-            "Result": pct_text(range_full_hit),
-            "Sample": n,
-            "Definition": "Entire next 5-day high-low path stayed inside the auction range."
-        },
-        {
-            "Measure": "Expansion hit rate",
-            "Result": pct_text(expansion_hit_rate),
-            "Sample": len(expansion),
-            "Definition": "For WATCH/ELEVATED/HIGH setups, price touched the indicated 1.5x ATR expansion side."
-        },
-        {
-            "Measure": "Average next 5-day return",
-            "Result": f"{avg_forward_return:+.2f}%",
-            "Sample": n,
-            "Definition": "Average forward close-to-close return after each historical signal."
-        },
-        {
-            "Measure": "Median next 5-day return",
-            "Result": f"{median_forward_return:+.2f}%",
-            "Sample": n,
-            "Definition": "Median forward close-to-close return after each historical signal."
-        },
-    ]
-
-    st.markdown("#### Accuracy Summary")
-    st.dataframe(pd.DataFrame(accuracy_rows), use_container_width=True, hide_index=True)
-
-    st.markdown("#### Recent Backtest Signals")
-    display_cols = [
-        "signal_date",
-        "entry_price",
-        "near_term_bias",
-        "forward_5d_return_%",
-        "bias_correct",
-        "range_close_hit",
-        "range_full_hit",
-        "expansion_status",
-        "expansion_direction",
-        "expansion_hit",
-        "relative_strength",
-        "market_regime",
-        "institutional_participation",
-        "supply_exhaustion",
-    ]
-
-    display_df = backtest_df[display_cols].tail(30).copy()
-    display_df["entry_price"] = display_df["entry_price"].map(lambda x: f"${x:,.0f}")
-    display_df["forward_5d_return_%"] = display_df["forward_5d_return_%"].map(lambda x: f"{x:+.2f}%")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    csv = backtest_df.to_csv(index=False)
-    st.download_button(
-        "Download backtest results as CSV",
-        data=csv,
-        file_name=f"{ticker}_backtest.csv",
-        mime="text/csv"
-    )
-
-
-def summarize_backtest_for_database(ticker, benchmark, backtest_df, horizon_days=5):
-    """Create one cumulative summary row for the current ticker backtest."""
-    run_timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    if backtest_df is None or backtest_df.empty:
-        return {
-            "run_timestamp": run_timestamp,
-            "ticker": ticker,
-            "benchmark": benchmark,
-            "signals_tested": 0,
-            "directional_accuracy_%": np.nan,
-            "all_bias_accuracy_%": np.nan,
-            "range_close_hit_%": np.nan,
-            "range_full_containment_%": np.nan,
-            "expansion_hit_rate_%": np.nan,
-            "avg_forward_return_%": np.nan,
-            "median_forward_return_%": np.nan,
-            "horizon_days": horizon_days,
-        }
-
-    n = len(backtest_df)
-    directional = backtest_df[backtest_df["directional_scored"]]
-    expansion = backtest_df[backtest_df["expansion_scored"]]
-
-    directional_accuracy = directional["bias_correct"].mean() if len(directional) else np.nan
-    all_bias_accuracy = backtest_df["bias_correct"].mean()
-    range_close_hit = backtest_df["range_close_hit"].mean()
-    range_full_hit = backtest_df["range_full_hit"].mean()
-    expansion_hit_rate = expansion["expansion_hit"].mean() if len(expansion) else np.nan
-    avg_forward_return = backtest_df["forward_5d_return_%"].mean()
-    median_forward_return = backtest_df["forward_5d_return_%"].median()
-
-    latest = backtest_df.iloc[-1]
-
-    return {
-        "run_timestamp": run_timestamp,
-        "ticker": ticker,
-        "benchmark": benchmark,
-        "signals_tested": int(n),
-        "directional_sample": int(len(directional)),
-        "expansion_sample": int(len(expansion)),
-        "directional_accuracy_%": directional_accuracy * 100 if pd.notna(directional_accuracy) else np.nan,
-        "all_bias_accuracy_%": all_bias_accuracy * 100 if pd.notna(all_bias_accuracy) else np.nan,
-        "range_close_hit_%": range_close_hit * 100 if pd.notna(range_close_hit) else np.nan,
-        "range_full_containment_%": range_full_hit * 100 if pd.notna(range_full_hit) else np.nan,
-        "expansion_hit_rate_%": expansion_hit_rate * 100 if pd.notna(expansion_hit_rate) else np.nan,
-        "avg_forward_return_%": avg_forward_return,
-        "median_forward_return_%": median_forward_return,
-        "latest_signal_date": latest.get("signal_date", ""),
-        "latest_near_term_bias": latest.get("near_term_bias", ""),
-        "latest_relative_strength": latest.get("relative_strength", ""),
-        "latest_market_regime": latest.get("market_regime", ""),
-        "latest_institutional_participation": latest.get("institutional_participation", ""),
-        "latest_supply_exhaustion": latest.get("supply_exhaustion", ""),
-        "latest_expansion_status": latest.get("expansion_status", ""),
-        "latest_expansion_direction": latest.get("expansion_direction", ""),
-        "horizon_days": horizon_days,
-    }
-
-
-def add_backtest_summary_to_session(ticker, benchmark, backtest_df, horizon_days=5):
-    """Append/replace a ticker backtest summary in Streamlit session state."""
-    if "cumulative_backtest_db" not in st.session_state:
-        st.session_state["cumulative_backtest_db"] = pd.DataFrame()
-
-    row = summarize_backtest_for_database(ticker, benchmark, backtest_df, horizon_days=horizon_days)
-    existing = st.session_state["cumulative_backtest_db"].copy()
-    new_row = pd.DataFrame([row])
-
-    if existing.empty:
-        updated = new_row
-    else:
-        # Keep only the latest run per ticker+benchmark so repeated tests do not duplicate rows.
-        mask = ~(
-            (existing["ticker"].astype(str).str.upper() == ticker.upper())
-            & (existing["benchmark"].astype(str).str.upper() == benchmark.upper())
         )
-        updated = pd.concat([existing[mask], new_row], ignore_index=True)
-
-    st.session_state["cumulative_backtest_db"] = updated
+    return pd.DataFrame(rows)
 
 
-def render_cumulative_backtest_database():
-    st.subheader("Cumulative Backtest Database")
-
-    db = st.session_state.get("cumulative_backtest_db", pd.DataFrame())
-
-    if db.empty:
-        st.info("No cumulative backtest rows yet. Run a ticker with the backtest dashboard enabled.")
-        return
-
-    display_db = db.copy()
-
-    percent_cols = [
-        "directional_accuracy_%",
-        "all_bias_accuracy_%",
-        "range_close_hit_%",
-        "range_full_containment_%",
-        "expansion_hit_rate_%",
-        "avg_forward_return_%",
-        "median_forward_return_%",
-    ]
-
-    for col in percent_cols:
-        if col in display_db.columns:
-            display_db[col] = display_db[col].map(lambda x: "" if pd.isna(x) else f"{x:.1f}%")
-
-    st.dataframe(display_db, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "Download cumulative backtest database as CSV",
-        data=db.to_csv(index=False),
-        file_name="cumulative_backtest_database.csv",
-        mime="text/csv"
-    )
-
-def run_model_streamlit(ticker, benchmark):
-    global BENCHMARK_TICKER
-    BENCHMARK_TICKER = benchmark.upper().strip()
-
-    df = download_ohlcv(ticker)
-    benchmark_df = download_ohlcv(BENCHMARK_TICKER)
-
-    if df.empty:
-        raise ValueError("No stock data returned. Check the ticker.")
-    if benchmark_df.empty:
-        raise ValueError("No benchmark data returned. Check the benchmark ticker.")
-    if len(df) < 120:
-        raise ValueError("Not enough stock history.")
-    if len(benchmark_df) < 120:
-        raise ValueError("Not enough benchmark history.")
-
-    result = auction_model(df, benchmark_df)
-    summary_table = make_summary_table(result)
-    return result, df, benchmark_df, summary_table
+# ----------------------------
+# Streamlit app
+# ----------------------------
 
 
 def main():
-    st.set_page_config(
-        page_title="Auction Pressure Model",
-        layout="wide"
+    st.set_page_config(page_title="Historical Setup Profiler", layout="wide")
+    st.title("Historical Setup Profiler")
+    st.caption(
+        "Find historical analogs for the current compression / CLV / volume / relative-strength setup, "
+        "then inspect what happened 5 trading days later."
     )
-
-    st.title("Auction Pressure Model")
 
     with st.sidebar:
         st.header("Inputs")
-        ticker = st.text_input("Ticker", value="AAPL").strip().upper()
+        ticker_1 = st.text_input("Ticker 1", value="AAPL").strip().upper()
+        ticker_2 = st.text_input("Ticker 2 / Peer", value="MSFT").strip().upper()
         benchmark = st.text_input("Benchmark", value="SPY").strip().upper()
-        run_backtest = st.checkbox("Run backtest dashboard", value=True)
-        backtest_lookback = st.slider("Backtest signals", min_value=30, max_value=150, value=80, step=10)
-        clear_cumulative = st.button("Clear cumulative database")
-        run_button = st.button("Run model", type="primary")
+        period = st.selectbox("History", ["2y", "5y", "10y", "max"], index=1)
 
-    if clear_cumulative:
-        st.session_state["cumulative_backtest_db"] = pd.DataFrame()
-        st.success("Cumulative backtest database cleared.")
+        st.header("Similarity matching")
+        compression_tolerance_pp = st.slider("Compression percentile tolerance (+/- points)", 1, 25, 5, 1)
+        selected_filters = st.multiselect(
+            "Optional filters to also match",
+            ["CLV trend", "Volume support", "Relative strength"],
+            default=[],
+        )
+        clv_tolerance = st.slider("CLV trend tolerance", 0.01, 0.50, 0.10, 0.01)
+        volume_tolerance_pct = st.slider("Volume ratio tolerance (+/- %)", 5, 100, 25, 5)
+        rs_tolerance_pp = st.slider("Relative strength tolerance (+/- percentage points)", 1, 30, 5, 1)
 
-    if not ticker:
-        st.info("Enter a ticker to begin.")
-        render_cumulative_backtest_database()
+        run_button = st.button("Run profile", type="primary")
+
+    if not run_button:
+        st.info("Enter one or two tickers, choose filters, then click Run profile.")
         return
 
-    if run_button:
-        try:
-            with st.spinner(f"Downloading data and running model for {ticker}..."):
-                result, df, benchmark_df, summary_table = run_model_streamlit(ticker, benchmark)
+    if not ticker_1:
+        st.error("Ticker 1 is required.")
+        return
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Ticker", ticker)
-            col2.metric("Benchmark", benchmark)
-            col3.metric("Current price", money0(result["ticker_price"]))
-            col4.metric("Last data bar", str(result["last_bar_date"]))
+    try:
+        with st.spinner("Downloading benchmark data..."):
+            benchmark_df = download_ohlcv(benchmark, period)
+            if benchmark_df.empty:
+                raise ValueError(f"No data returned for benchmark {benchmark}.")
 
-            st.subheader("Model Output")
-            render_summary_table(summary_table)
+        profiles = []
+        for ticker in [ticker_1, ticker_2]:
+            if ticker:
+                with st.spinner(f"Profiling {ticker}..."):
+                    profiles.append(
+                        build_profile(
+                            ticker=ticker,
+                            benchmark_df=benchmark_df,
+                            benchmark_name=benchmark,
+                            period=period,
+                            compression_tolerance_pp=compression_tolerance_pp,
+                            selected_filters=selected_filters,
+                            clv_tolerance=clv_tolerance,
+                            volume_tolerance_pct=volume_tolerance_pct,
+                            rs_tolerance_pp=rs_tolerance_pp,
+                        )
+                    )
 
-            with st.expander("Show as downloadable dataframe"):
-                st.dataframe(summary_table, use_container_width=True, hide_index=True)
-                st.download_button(
-                    "Download table as CSV",
-                    data=summary_table.to_csv(index=False),
-                    file_name=f"{ticker}_auction_pressure_model.csv",
-                    mime="text/csv"
-                )
+        st.subheader("Side-by-side setup comparison")
+        compare_df = compare_profiles_table(profiles)
+        st.dataframe(compare_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download side-by-side comparison",
+            data=compare_df.to_csv(index=False),
+            file_name="setup_comparison.csv",
+            mime="text/csv",
+        )
 
-            st.subheader("Chart")
-            fig = build_chart(df, result, ticker)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+        if len(profiles) == 1:
+            render_profile(profiles[0])
+        else:
+            tab_labels = [p["ticker"] for p in profiles]
+            tabs = st.tabs(tab_labels)
+            for tab, profile in zip(tabs, profiles):
+                with tab:
+                    render_profile(profile)
 
-            if run_backtest:
-                with st.spinner(f"Running {backtest_lookback}-signal backtest for {ticker}..."):
-                    backtest_df = run_backtest_cached(df, benchmark_df, lookback_days=backtest_lookback, horizon_days=5)
-                render_backtest_dashboard(backtest_df, ticker, horizon_days=5)
-                add_backtest_summary_to_session(ticker, benchmark, backtest_df, horizon_days=5)
-
-            render_cumulative_backtest_database()
-
-        except Exception as e:
-            st.error(str(e))
-    else:
-        st.caption("Enter a ticker and click Run model.")
-        render_cumulative_backtest_database()
+    except Exception as e:
+        st.error(str(e))
 
 
 if __name__ == "__main__":
