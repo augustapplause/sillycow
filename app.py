@@ -353,19 +353,20 @@ def inject_custom_css():
         .outcome-card {
             border: 1px solid #dfe5ef;
             border-radius: 10px;
-            padding: 14px 12px;
+            padding: 18px 14px;
             text-align: center;
-            min-height: 120px;
+            min-height: 150px;
         }
         .outcome-title {
             color: #0f1730;
-            font-size: 0.62rem;
-            margin-bottom: 6px;
+            font-size: 0.98rem;
+            margin-bottom: 8px;
+            font-weight: 800;
         }
         .outcome-number {
-            font-size: 0.88rem;
-            font-weight: 850;
-            margin-bottom: 14px;
+            font-size: 1.35rem;
+            font-weight: 900;
+            margin-bottom: 16px;
         }
         .divider {
             border-top: 1px solid #d5dbe7;
@@ -385,16 +386,23 @@ def inject_custom_css():
         div[data-testid="stMetric"] {
             border: 1px solid #dfe5ef;
             border-radius: 10px;
-            padding: 12px 12px;
+            padding: 8px 8px;
             background: white;
+            min-height: 92px;
+            overflow: hidden;
         }
         div[data-testid="stMetricLabel"] {
-            font-size: 0.82rem;
+            font-size: 0.70rem;
             font-weight: 800;
+            line-height: 1.05;
+            white-space: normal;
         }
         div[data-testid="stMetricValue"] {
-            font-size: 1.65rem;
+            font-size: 1.10rem;
             font-weight: 850;
+            line-height: 1.1;
+            white-space: normal;
+            overflow-wrap: anywhere;
         }
         </style>
         """,
@@ -419,7 +427,16 @@ def build_analog_chart(profile, hvns):
     fig, ax = plt.subplots(figsize=(13, 5.8))
 
     if analogs.empty:
-        ax.text(0.5, 0.5, "No historical analogs found", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No historical analogs found",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=18,
+            fontweight="bold",
+        )
         ax.set_axis_off()
         return fig
 
@@ -427,32 +444,84 @@ def build_analog_chart(profile, hvns):
     chart_df["Date"] = pd.to_datetime(chart_df["Date"])
     chart_df = chart_df.sort_values("Date")
 
-    ax.plot(chart_df["Date"], chart_df["Future_Close_5D"], linewidth=1.1, alpha=0.65)
-    ax.scatter(chart_df["Date"], chart_df["Future_Close_5D"], s=70, label="Close 5 trading days later", zorder=3)
+    ax.plot(chart_df["Date"], chart_df["Future_Close_5D"], linewidth=1.4, alpha=0.65)
+    ax.scatter(
+        chart_df["Date"],
+        chart_df["Future_Close_5D"],
+        s=78,
+        label="Close 5 trading days later",
+        zorder=3,
+    )
 
     best = chart_df.loc[chart_df["Dollar_Change_5D"].idxmax()]
     worst = chart_df.loc[chart_df["Dollar_Change_5D"].idxmin()]
 
-    ax.scatter([pd.to_datetime(best["Date"])], [best["Future_Close_5D"]], s=160, color="green", label="Biggest advance", zorder=4)
-    ax.scatter([pd.to_datetime(worst["Date"])], [worst["Future_Close_5D"]], s=160, color="red", label="Biggest decline", zorder=4)
+    ax.scatter(
+        [pd.to_datetime(best["Date"])],
+        [best["Future_Close_5D"]],
+        s=175,
+        color="green",
+        label="Biggest advance",
+        zorder=4,
+    )
+    ax.scatter(
+        [pd.to_datetime(worst["Date"])],
+        [worst["Future_Close_5D"]],
+        s=175,
+        color="red",
+        label="Biggest decline",
+        zorder=4,
+    )
 
-    ax.axhline(latest_close, linestyle="--", linewidth=1.4, color="#2166ff", label=f"Current close {money0(latest_close)}")
-    ax.text(chart_df["Date"].max(), latest_close + 1, f"Current close {money0(latest_close)}", color="#2166ff", ha="right", va="bottom", fontsize=10, fontweight="bold")
+    price_span = max(chart_df["Future_Close_5D"].max() - chart_df["Future_Close_5D"].min(), 1)
+    label_offset = price_span * 0.025
+
+    ax.axhline(
+        latest_close,
+        linestyle="--",
+        linewidth=1.6,
+        color="#2166ff",
+        label=f"Current close {money0(latest_close)}",
+    )
+    ax.text(
+        chart_df["Date"].max(),
+        latest_close + label_offset,
+        f"Current close {money0(latest_close)}",
+        color="#2166ff",
+        ha="right",
+        va="bottom",
+        fontsize=14,
+        fontweight="bold",
+    )
 
     for h in hvns[:3]:
-        ax.axhline(h["price"], linestyle="--", linewidth=1.2, color="green", alpha=0.85)
-        ax.text(chart_df["Date"].max(), h["price"], money2(h["price"]), color="green", ha="left", va="center", fontsize=10, fontweight="bold")
+        ax.axhline(h["price"], linestyle="--", linewidth=1.4, color="green", alpha=0.85)
+        ax.text(
+            chart_df["Date"].max(),
+            h["price"],
+            money2(h["price"]),
+            color="green",
+            ha="left",
+            va="center",
+            fontsize=14,
+            fontweight="bold",
+        )
 
     ax.plot([], [], linestyle="--", color="green", label="Top 3 HVNs")
 
-    ax.set_title(f"{ticker}: Historical Similar Compression Setups — Price 5 Days Later", fontsize=13, fontweight="bold", pad=14)
-    ax.set_xlabel("Analog Date", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Share Price 5 Days Later", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"{ticker}: Historical Similar Compression Setups — Price 5 Days Later",
+        fontsize=18,
+        fontweight="bold",
+        pad=16,
+    )
+    ax.set_xlabel("Analog Date", fontsize=15, fontweight="bold")
+    ax.set_ylabel("Share Price 5 Days Later", fontsize=15, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=12)
     ax.grid(True, alpha=0.24)
-    ax.legend(loc="lower right", frameon=True)
+    ax.legend(loc="lower right", frameon=True, fontsize=12)
     fig.tight_layout()
     return fig
-
 
 def render_summary_metrics(profile):
     analogs = profile["analogs"]
@@ -503,7 +572,8 @@ def build_distribution_chart(profile, bins_count):
             ha="center",
             va="center",
             transform=ax.transAxes,
-            fontsize=24,
+            fontsize=16,
+            fontweight="bold",
         )
         ax.set_axis_off()
         return fig
@@ -520,20 +590,19 @@ def build_distribution_chart(profile, bins_count):
     y = np.arange(len(labels))
     ax.barh(y, counts, color="#0d5bd6")
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=27)
+    ax.set_yticklabels(labels, fontsize=11)
     ax.invert_yaxis()
-    ax.set_xlabel("Count", fontsize=30, fontweight="bold")
-    ax.set_ylabel("Dollar Change (5D)", fontsize=30, fontweight="bold")
-    ax.tick_params(axis="x", labelsize=24)
+    ax.set_xlabel("Count", fontsize=13, fontweight="bold")
+    ax.set_ylabel("Dollar Change (5D)", fontsize=13, fontweight="bold")
+    ax.tick_params(axis="x", labelsize=11)
     ax.grid(axis="x", alpha=0.22)
 
     for i, count in enumerate(counts):
-        ax.text(count + 0.15, i, str(int(count)), va="center", fontsize=24, fontweight="bold")
+        ax.text(count + 0.15, i, str(int(count)), va="center", fontsize=10, fontweight="bold")
 
     ax.set_xlim(0, max(int(counts.max()) + 3, 5))
     fig.tight_layout()
     return fig
-
 
 def render_distribution(profile):
     analogs = profile["analogs"]
