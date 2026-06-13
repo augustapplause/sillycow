@@ -533,7 +533,7 @@ def build_analog_chart(profile, hvns):
         min_y = min(min_y, h["price"])
         max_y = max(max_y, h["price"])
     price_span = max(max_y - min_y, 1)
-    label_offset = price_span * 0.025
+    label_offset = price_span * 0.03
 
     ax.axhline(
         latest_close,
@@ -542,43 +542,89 @@ def build_analog_chart(profile, hvns):
         color="#2166ff",
         label=f"Current close {money0(latest_close)}",
     )
-    ax.text(
-        chart_df["Date"].max(),
-        latest_close + label_offset,
-        f"Current close {money0(latest_close)}",
-        color="#2166ff",
-        ha="right",
-        va="bottom",
-        fontsize=14,
-        fontweight="bold",
-    )
+
+    label_items = [
+        {
+            "y": latest_close,
+            "text": f"Current close {money0(latest_close)}",
+            "color": "#2166ff",
+            "ha": "right",
+            "x": chart_df["Date"].max(),
+        }
+    ]
 
     for h in hvns[:3]:
         ax.axhline(h["price"], linestyle="--", linewidth=1.4, color="green", alpha=0.85)
-        ax.text(
-            chart_df["Date"].max(),
-            h["price"],
-            money2(h["price"]),
-            color="green",
-            ha="left",
+        label_items.append(
+            {
+                "y": h["price"],
+                "text": money2(h["price"]),
+                "color": "green",
+                "ha": "left",
+                "x": chart_df["Date"].max(),
+            }
+        )
+
+    # Prevent current-close and HVN labels from sitting on top of one another.
+    # Labels are assigned display y-positions at least one label-height apart;
+    # when moved, leader lines point back to the exact horizontal level.
+    sorted_items = sorted(label_items, key=lambda item: item["y"])
+    min_gap = price_span * 0.065
+    for idx in range(1, len(sorted_items)):
+        prev_y = sorted_items[idx - 1].get("display_y", sorted_items[idx - 1]["y"])
+        this_y = sorted_items[idx]["y"]
+        if this_y - prev_y < min_gap:
+            sorted_items[idx]["display_y"] = prev_y + min_gap
+    for idx in range(len(sorted_items) - 2, -1, -1):
+        next_y = sorted_items[idx + 1].get("display_y", sorted_items[idx + 1]["y"])
+        this_y = sorted_items[idx].get("display_y", sorted_items[idx]["y"])
+        if next_y - this_y < min_gap:
+            sorted_items[idx]["display_y"] = next_y - min_gap
+
+    for item in label_items:
+        display_y = item.get("display_y", item["y"])
+        moved = abs(display_y - item["y"]) > price_span * 0.01
+        arrowprops = None
+        if moved:
+            arrowprops = {
+                "arrowstyle": "-",
+                "color": item["color"],
+                "lw": 1.1,
+                "alpha": 0.85,
+                "shrinkA": 0,
+                "shrinkB": 0,
+            }
+        ax.annotate(
+            item["text"],
+            xy=(item["x"], item["y"]),
+            xytext=(item["x"], display_y),
+            textcoords="data",
+            color=item["color"],
+            ha=item["ha"],
             va="center",
             fontsize=14,
             fontweight="bold",
+            arrowprops=arrowprops,
+            zorder=5,
         )
 
     if hvns:
         ax.plot([], [], linestyle="--", color="green", label="Top 3 HVNs")
 
-    ax.set_ylim(min_y - price_span * 0.08, max_y + price_span * 0.08)
+    label_y_values = [item.get("display_y", item["y"]) for item in label_items]
+    adjusted_min_y = min(min_y, min(label_y_values))
+    adjusted_max_y = max(max_y, max(label_y_values))
+    adjusted_span = max(adjusted_max_y - adjusted_min_y, 1)
+    ax.set_ylim(adjusted_min_y - adjusted_span * 0.08, adjusted_max_y + adjusted_span * 0.08)
     ax.set_title(
         f"{title_name}: Historical Similar Compression Setups — Price 5 Days Later",
         fontsize=20,
         fontweight="bold",
         pad=16,
     )
-    ax.set_xlabel("Analog Date", fontsize=19, fontweight="bold")
-    ax.set_ylabel("Share Price 5 Days Later", fontsize=19, fontweight="bold")
-    ax.tick_params(axis="both", labelsize=16)
+    ax.set_xlabel("Analog Date", fontsize=21, fontweight="bold")
+    ax.set_ylabel("Share Price 5 Days Later", fontsize=21, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=18)
     ax.grid(True, alpha=0.24)
     ax.legend(loc="lower right", frameon=True, fontsize=14)
     fig.tight_layout()
@@ -679,11 +725,13 @@ def build_distribution_chart(profile, bins_count):
     y = np.arange(len(labels))
     max_count = int(counts.max()) if len(counts) else 0
 
-    # Keep text large, but scale it down enough to prevent overlap when the
-    # slider creates many thin bars.
-    bar_label_size = max(8, min(15, int(24 - bins_count * 0.55)))
-    axis_tick_size = max(8, min(14, int(21 - bins_count * 0.45)))
-    axis_title_size = max(11, min(15, int(20 - bins_count * 0.25)))
+    # Scale text relative to bar thickness. Fewer bins allow larger labels;
+    # more bins automatically reduce labels enough to avoid overlap.
+    bar_height_inches = 5.0 / max(bins_count, 1)
+    scaled_size = int(bar_height_inches * 34)
+    bar_label_size = max(8, min(15, scaled_size))
+    axis_tick_size = max(8, min(14, scaled_size - 1))
+    axis_title_size = max(12, min(16, scaled_size + 1))
 
     ax.barh(y, counts, color="#0d5bd6")
     ax.set_yticks(y)
@@ -696,18 +744,23 @@ def build_distribution_chart(profile, bins_count):
     ax.xaxis.set_major_formatter(StrMethodFormatter("{x:.0f}"))
     ax.grid(axis="x", alpha=0.22)
 
-    label_pad = max(max_count * 0.025, 0.12)
+    label_pad = max(max_count * 0.035, 0.18)
+    x_limit = max(max_count + label_pad + max(max_count * 0.12, 1.0), 5)
+    ax.set_xlim(0, x_limit)
+
     for i, count in enumerate(counts):
+        label_x = min(int(count) + label_pad, x_limit * 0.96)
         ax.text(
-            int(count) + label_pad,
+            label_x,
             i,
             f"{int(count)}",
             va="center",
+            ha="left",
             fontsize=bar_label_size,
             fontweight="bold",
+            clip_on=True,
         )
 
-    ax.set_xlim(0, max(max_count + 2, 5))
     fig.tight_layout()
     return fig
 
@@ -771,35 +824,50 @@ def render_analogs_table(profile):
     st.caption(f"Showing all {len(analogs)} entries. Scroll inside the table to view rows beyond the first 10.")
 
 
-def render_hvn_controls(key_prefix="main"):
-    st.markdown('<div class="section-title">HVN Controls for This Tab</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1.25, 1, 1])
+def get_hvn_settings_from_state(key_prefix="main"):
+    selection_key = f"{key_prefix}_hvn_selection"
+    min_percentile_key = f"{key_prefix}_hvn_min_volume_percentile"
+    decay_key = f"{key_prefix}_hvn_decay_days"
 
-    with c1:
-        hvn_selection = st.selectbox(
-            "HVN Selection",
-            ["Top 5 by Volume", "Top 10 by Volume", "Top 20 by Volume"],
-            index=1,
-            key=f"{key_prefix}_hvn_selection",
-        )
-    with c2:
-        min_volume_percentile = st.slider(
-            "Minimum Volume Percentile",
-            50,
-            99,
-            85,
-            1,
-            key=f"{key_prefix}_hvn_min_volume_percentile",
-        )
-    with c3:
-        hvn_decay_days = st.slider(
-            "Node Decay (Days)",
-            30,
-            365,
-            180,
-            1,
-            key=f"{key_prefix}_hvn_decay_days",
-        )
+    hvn_selection = st.session_state.get(selection_key, "Top 10 by Volume")
+    min_volume_percentile = st.session_state.get(min_percentile_key, 85)
+    hvn_decay_days = st.session_state.get(decay_key, 180)
+
+    try:
+        hvn_count = int(str(hvn_selection).split()[1])
+    except Exception:
+        hvn_count = 10
+
+    return hvn_count, hvn_decay_days, min_volume_percentile
+
+
+def render_hvn_controls(key_prefix="main"):
+    hvn_selection = st.selectbox(
+        "HVN Selection",
+        ["Top 5 by Volume", "Top 10 by Volume", "Top 20 by Volume"],
+        index=1,
+        key=f"{key_prefix}_hvn_selection",
+    )
+    min_volume_percentile = st.slider(
+        "Minimum Volume Percentile",
+        50,
+        99,
+        85,
+        1,
+        key=f"{key_prefix}_hvn_min_volume_percentile",
+    )
+    hvn_decay_days = st.slider(
+        "Node Decay (Days)",
+        30,
+        365,
+        180,
+        1,
+        key=f"{key_prefix}_hvn_decay_days",
+    )
+    st.info(
+        "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
+        "higher values include more historical data."
+    )
 
     hvn_count = int(hvn_selection.split()[1])
     return hvn_count, hvn_decay_days, min_volume_percentile
@@ -837,19 +905,24 @@ def render_hvn_table(hvns):
     st.caption("Sorted by price (high to low)")
 
 
-def render_hvn_section(active_hvns):
+def render_hvn_section(profile, key_prefix="main"):
     st.markdown('<div class="section-title">HVN (High Volume Nodes) ⓘ</div>', unsafe_allow_html=True)
-    st.info(
-        "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
-        "higher values include more historical data."
-    )
-    render_hvn_table(active_hvns)
+
+    left, right = st.columns([1.05, 2.55])
+    with left:
+        hvn_count, hvn_decay_days, min_volume_percentile = render_hvn_controls(key_prefix=key_prefix)
+
+    active_hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
+
+    with right:
+        render_hvn_table(active_hvns)
 
 
 def render_profile(profile, key_prefix="main"):
-    # Each ticker tab gets its own HVN controls. These controls change only the
-    # HVN lines/table for that tab; the sidebar matching metrics remain shared.
-    hvn_count, hvn_decay_days, min_volume_percentile = render_hvn_controls(key_prefix=key_prefix)
+    # HVN widgets are displayed beside the HVN table below, but Streamlit stores
+    # their latest values in session state. Reading that state here lets the line
+    # graph update on rerun without placing the controls above the graph.
+    hvn_count, hvn_decay_days, min_volume_percentile = get_hvn_settings_from_state(key_prefix=key_prefix)
     active_hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
 
     fig = build_analog_chart(profile, active_hvns)
@@ -859,7 +932,7 @@ def render_profile(profile, key_prefix="main"):
     render_summary_metrics(profile)
     render_distribution(profile, key_prefix=key_prefix)
     render_analogs_table(profile)
-    render_hvn_section(active_hvns)
+    render_hvn_section(profile, key_prefix=key_prefix)
 
 def main():
     st.set_page_config(page_title="Stock Setup Profiler", layout="wide")
