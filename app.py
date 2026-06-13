@@ -613,7 +613,20 @@ def main():
             criteria.append(f"Volume ratio ±{volume_tolerance_pct}%")
         if use_rs:
             criteria.append(f"Relative strength ±{rs_tolerance_pp} pts")
-        st.caption("Matched on: " + "; ".join(criteria))
+
+        st.markdown(
+            f"""
+            <div style="
+                font-size:0.60rem;
+                color:#888888;
+                margin-top:-12px;
+                margin-bottom:8px;
+            ">
+            Matched on: {'; '.join(criteria)}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         compare_df = compare_profiles_table(profiles)
         st.dataframe(compare_df, use_container_width=True, hide_index=True)
         st.download_button(
