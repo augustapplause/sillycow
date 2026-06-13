@@ -95,14 +95,19 @@ def get_ticker_display_name(ticker: str) -> str:
     try:
         info = yf.Ticker(ticker).get_info()
     except Exception:
-        return ticker
+        return ""
 
-    for key in ["shortName", "longName", "displayName"]:
-        value = info.get(key) if isinstance(info, dict) else None
-        if value:
-            return str(value)
+    if not isinstance(info, dict):
+        return ""
 
-    return ticker
+    # Prefer company-style names for chart titles. Fall back quietly if yfinance
+    # does not return name metadata for the ticker.
+    for key in ["longName", "shortName", "displayName"]:
+        value = info.get(key)
+        if value and str(value).strip().upper() != ticker:
+            return str(value).strip()
+
+    return ""
 
 
 def clv(df):
@@ -407,31 +412,55 @@ def inject_custom_css():
             border-radius: 8px;
             overflow: hidden;
         }
-        div[data-testid="stMetric"] {
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 0.55rem;
+            margin: 0.7rem 0 1.05rem;
+        }
+        .summary-card {
             border: 1px solid #dfe5ef;
             border-radius: 10px;
-            padding: 7px 6px;
             background: white;
-            min-height: 106px;
+            padding: 10px 8px 12px;
+            min-height: 96px;
             overflow: visible;
         }
-        div[data-testid="stMetricLabel"] {
-            font-size: 0.62rem;
-            font-weight: 800;
-            line-height: 1.0;
+        .summary-label {
+            color: #33405f;
+            font-size: 0.84rem;
+            line-height: 1.05;
+            font-weight: 850;
             white-space: normal;
             overflow-wrap: anywhere;
+            margin-bottom: 8px;
         }
-        div[data-testid="stMetricValue"] {
-            font-size: clamp(0.72rem, 1.05vw, 0.96rem);
-            font-weight: 850;
-            line-height: 1.05;
+        .summary-value {
+            color: #111936;
+            font-size: clamp(1.05rem, 1.55vw, 1.55rem);
+            line-height: 1.08;
+            font-weight: 950;
             white-space: normal;
             overflow-wrap: anywhere;
             word-break: break-word;
         }
-        div[data-testid="stMetricDelta"] {
-            font-size: 0.62rem;
+        .summary-range-value {
+            font-size: clamp(0.95rem, 1.3vw, 1.35rem);
+            line-height: 1.1;
+            font-weight: 950;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        @media (max-width: 1100px) {
+            .summary-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+        @media (max-width: 700px) {
+            .summary-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
         </style>
         """,
@@ -451,8 +480,8 @@ def get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile):
 def build_analog_chart(profile, hvns):
     analogs = profile["analogs"]
     ticker = profile["ticker"]
-    stock_name = profile.get("stock_name") or ticker
-    title_name = f"{ticker} - {stock_name}" if stock_name.upper() != ticker.upper() else ticker
+    stock_name = str(profile.get("stock_name") or "").strip()
+    title_name = f"{ticker} ({stock_name})" if stock_name and stock_name.upper() != ticker.upper() else ticker
     latest_close = float(profile["df"].iloc[-1]["Close"])
 
     fig, ax = plt.subplots(figsize=(13, 5.8))
@@ -549,23 +578,41 @@ def build_analog_chart(profile, hvns):
     ax.set_ylim(min_y - price_span * 0.08, max_y + price_span * 0.08)
     ax.set_title(
         f"{title_name}: Historical Similar Compression Setups — Price 5 Days Later",
-        fontsize=18,
+        fontsize=20,
         fontweight="bold",
         pad=16,
     )
-    ax.set_xlabel("Analog Date", fontsize=15, fontweight="bold")
-    ax.set_ylabel("Share Price 5 Days Later", fontsize=15, fontweight="bold")
-    ax.tick_params(axis="both", labelsize=12)
+    ax.set_xlabel("Analog Date", fontsize=19, fontweight="bold")
+    ax.set_ylabel("Share Price 5 Days Later", fontsize=19, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=16)
     ax.grid(True, alpha=0.24)
-    ax.legend(loc="lower right", frameon=True, fontsize=12)
+    ax.legend(loc="lower right", frameon=True, fontsize=14)
     fig.tight_layout()
     return fig
+
+def color_class_for_number(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    value = float(value)
+    if value > 0:
+        return "green"
+    if value < 0:
+        return "red"
+    return ""
+
 
 def render_summary_metrics(profile):
     analogs = profile["analogs"]
 
     if analogs.empty:
-        values = ["0", "N/A", "N/A", "N/A", "N/A", "N/A"]
+        metric_items = [
+            ("Analog count", "0", "summary-value"),
+            ("Avg 5D return", "N/A", "summary-value"),
+            ("Median 5D return", "N/A", "summary-value"),
+            ("Win rate", "N/A", "summary-value"),
+            ("Avg $ change", "N/A", "summary-value"),
+            ("Change Range", "N/A", "summary-range-value"),
+        ]
     else:
         avg_ret = analogs["Forward_Return_5D"].mean()
         med_ret = analogs["Forward_Return_5D"].median()
@@ -574,28 +621,42 @@ def render_summary_metrics(profile):
         min_change = analogs["Dollar_Change_5D"].min()
         max_change = analogs["Dollar_Change_5D"].max()
 
-        values = [
-            f"{len(analogs)}",
-            signed_pct1(avg_ret),
-            signed_pct1(med_ret),
-            f"{win_rate:.1f}%",
-            signed_money0(avg_change),
-            f"{signed_money0(min_change)} to {signed_money0(max_change)}",
+        min_class = color_class_for_number(min_change)
+        max_class = color_class_for_number(max_change)
+        avg_change_class = color_class_for_number(avg_change)
+        avg_ret_class = color_class_for_number(avg_ret)
+        med_ret_class = color_class_for_number(med_ret)
+
+        change_range_html = (
+            f'<span class="{min_class}">{html.escape(signed_money0(min_change))}</span>'
+            f' <span>to</span> '
+            f'<span class="{max_class}">{html.escape(signed_money0(max_change))}</span>'
+        )
+
+        metric_items = [
+            ("Analog count", html.escape(f"{len(analogs)}"), "summary-value"),
+            ("Avg 5D return", f'<span class="{avg_ret_class}">{html.escape(signed_pct1(avg_ret))}</span>', "summary-value"),
+            ("Median 5D return", f'<span class="{med_ret_class}">{html.escape(signed_pct1(med_ret))}</span>', "summary-value"),
+            ("Win rate", html.escape(f"{win_rate:.1f}%"), "summary-value"),
+            ("Avg $ change", f'<span class="{avg_change_class}">{html.escape(signed_money0(avg_change))}</span>', "summary-value"),
+            ("Change Range", change_range_html, "summary-range-value"),
         ]
 
-    labels = [
-        "Analog count",
-        "Avg 5D return",
-        "Median 5D return",
-        "Win rate",
-        "Avg $ change",
-        "Change Range",
-    ]
+    cards = []
+    for label, value_html, value_class in metric_items:
+        cards.append(
+            f"""
+            <div class="summary-card">
+                <div class="summary-label">{html.escape(label)}</div>
+                <div class="{value_class}">{value_html}</div>
+            </div>
+            """
+        )
 
-    cols = st.columns(6)
-    for col, label, value in zip(cols, labels, values):
-        with col:
-            st.metric(label, value)
+    st.markdown(
+        '<div class="summary-grid">' + "".join(cards) + '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def build_distribution_chart(profile, bins_count):
@@ -660,7 +721,7 @@ def build_distribution_chart(profile, bins_count):
     fig.tight_layout()
     return fig
 
-def render_distribution(profile):
+def render_distribution(profile, key_prefix="main"):
     analogs = profile["analogs"]
     positives = int((analogs["Dollar_Change_5D"] > 0).sum()) if not analogs.empty else 0
     negatives = int((analogs["Dollar_Change_5D"] <= 0).sum()) if not analogs.empty else 0
@@ -670,7 +731,7 @@ def render_distribution(profile):
 
     top_left, top_right = st.columns([3, 2])
     with top_right:
-        bins_count = st.slider("Number of bins", 6, 24, 12, 1, key="distribution_bins")
+        bins_count = st.slider("Number of bins", 6, 24, 12, 1, key=f"{key_prefix}_distribution_bins")
 
     c1, c2 = st.columns([3.4, 1.25])
     with c1:
@@ -720,7 +781,7 @@ def render_analogs_table(profile):
     st.caption(f"Showing all {len(analogs)} entries. Scroll inside the table to view rows beyond the first 10.")
 
 
-def render_hvn_section(profile):
+def render_hvn_section(profile, key_prefix="main"):
     st.markdown('<div class="section-title">HVN (High Volume Nodes) ⓘ</div>', unsafe_allow_html=True)
 
     left, right = st.columns([1.05, 2.55])
@@ -730,7 +791,7 @@ def render_hvn_section(profile):
             "HVN Selection",
             ["Top 5 by Volume", "Top 10 by Volume", "Top 20 by Volume"],
             index=1,
-            key="hvn_selection",
+            key=f"{key_prefix}_hvn_selection",
         )
         hvn_count = int(hvn_selection.split()[1])
         min_volume_percentile = st.slider(
@@ -739,9 +800,9 @@ def render_hvn_section(profile):
             99,
             85,
             1,
-            key="hvn_min_volume_percentile",
+            key=f"{key_prefix}_hvn_min_volume_percentile",
         )
-        hvn_decay_days = st.slider("Node Decay (Days)", 30, 365, 180, 1, key="hvn_decay_days")
+        hvn_decay_days = st.slider("Node Decay (Days)", 30, 365, 180, 1, key=f"{key_prefix}_hvn_decay_days")
         st.info(
             "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
             "higher values include more historical data."
@@ -781,11 +842,11 @@ def render_hvn_section(profile):
         st.caption("Sorted by price (high to low)")
 
 
-def render_profile(profile):
-    hvn_selection = st.session_state.get("hvn_selection", "Top 10 by Volume")
+def render_profile(profile, key_prefix="main"):
+    hvn_selection = st.session_state.get(f"{key_prefix}_hvn_selection", "Top 10 by Volume")
     hvn_count = int(str(hvn_selection).split()[1])
-    hvn_decay_days = st.session_state.get("hvn_decay_days", 180)
-    min_volume_percentile = st.session_state.get("hvn_min_volume_percentile", 85)
+    hvn_decay_days = st.session_state.get(f"{key_prefix}_hvn_decay_days", 180)
+    min_volume_percentile = st.session_state.get(f"{key_prefix}_hvn_min_volume_percentile", 85)
     active_hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
 
     fig = build_analog_chart(profile, active_hvns)
@@ -793,9 +854,9 @@ def render_profile(profile):
     plt.close(fig)
 
     render_summary_metrics(profile)
-    render_distribution(profile)
+    render_distribution(profile, key_prefix=key_prefix)
     render_analogs_table(profile)
-    render_hvn_section(profile)
+    render_hvn_section(profile, key_prefix=key_prefix)
 
 
 def main():
@@ -808,6 +869,7 @@ def main():
     with st.sidebar:
         st.header("Inputs")
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
+        comparison_ticker = st.text_input("Second ticker for comparison", value="MSFT").strip().upper()
         benchmark = st.text_input("Benchmark", value="SPY").strip().upper()
         period = st.selectbox("History", ["2y", "5y", "10y", "max"], index=1)
 
@@ -834,30 +896,62 @@ def main():
     if use_rs:
         selected_filters.append("Relative strength")
 
-    if not run_button and "profile" not in st.session_state:
+    requested_tickers = []
+    for entered_ticker in [ticker, comparison_ticker]:
+        if entered_ticker and entered_ticker not in requested_tickers:
+            requested_tickers.append(entered_ticker)
+
+    if not requested_tickers:
+        st.error("Enter at least one ticker.")
+        return
+
+    if not run_button and "profiles" not in st.session_state:
         run_button = True
 
-    if run_button:
+    current_request_key = (
+        tuple(requested_tickers),
+        benchmark,
+        period,
+        compression_tolerance_pp,
+        tuple(selected_filters),
+        clv_tolerance,
+        volume_tolerance_pct,
+        rs_tolerance_pp,
+    )
+
+    if run_button or st.session_state.get("profile_request_key") != current_request_key:
         try:
-            with st.spinner("Building profile..."):
+            with st.spinner("Building profiles..."):
                 benchmark_df = download_ohlcv(benchmark, period)
-                st.session_state["profile"] = build_profile(
-                    ticker=ticker,
-                    benchmark_df=benchmark_df,
-                    period=period,
-                    compression_tolerance_pp=compression_tolerance_pp,
-                    selected_filters=selected_filters,
-                    clv_tolerance=clv_tolerance,
-                    volume_tolerance_pct=volume_tolerance_pct,
-                    rs_tolerance_pp=rs_tolerance_pp,
-                )
+                profiles = []
+                for requested_ticker in requested_tickers:
+                    profiles.append(
+                        build_profile(
+                            ticker=requested_ticker,
+                            benchmark_df=benchmark_df,
+                            period=period,
+                            compression_tolerance_pp=compression_tolerance_pp,
+                            selected_filters=selected_filters,
+                            clv_tolerance=clv_tolerance,
+                            volume_tolerance_pct=volume_tolerance_pct,
+                            rs_tolerance_pp=rs_tolerance_pp,
+                        )
+                    )
+                st.session_state["profiles"] = profiles
+                st.session_state["profile_request_key"] = current_request_key
         except Exception as e:
             st.error(str(e))
             return
 
-    tab1, = st.tabs(["Similar setup outcomes"])
-    with tab1:
-        render_profile(st.session_state["profile"])
+    profiles = st.session_state.get("profiles", [])
+    if not profiles:
+        st.info("Run a profile to view results.")
+        return
+
+    tabs = st.tabs([f'{profile["ticker"]} outcomes' for profile in profiles])
+    for tab, profile in zip(tabs, profiles):
+        with tab:
+            render_profile(profile, key_prefix=profile["ticker"].lower().replace(".", "_"))
 
 
 if __name__ == "__main__":
