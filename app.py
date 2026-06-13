@@ -17,6 +17,9 @@ import yfinance as yf
 def money0(x):
     if x is None or pd.isna(x):
         return "Not available"
+    x = float(x)
+    if x < 0:
+        return f"-${abs(x):,.0f}"
     return f"${x:,.0f}"
 
 
@@ -254,6 +257,7 @@ def scan_similar_setups(
             "Volume_Ratio",
             "RS_60",
             "Future_Close_5D",
+            "Dollar_Change_5D",
             "Forward_Return_5D",
         ]
     ).copy()
@@ -288,8 +292,10 @@ def scan_similar_setups(
 
     out = out.reset_index().rename(columns={"index": "Date"})
     out["Date"] = pd.to_datetime(out["Date"]).dt.date
+    out["Dollar_Change_5D"] = out["Future_Close_5D"] - out["Close"]
     out["Close"] = out["Close"].round(2)
     out["Future_Close_5D"] = out["Future_Close_5D"].round(2)
+    out["Dollar_Change_5D"] = out["Dollar_Change_5D"].round(2)
     out["Forward_Return_5D"] = out["Forward_Return_5D"].round(2)
     out["Compression_Percentile"] = out["Compression_Percentile"].round(1)
     out["CLV_Trend"] = out["CLV_Trend"].round(3)
@@ -301,6 +307,7 @@ def scan_similar_setups(
             "Date",
             "Close",
             "Future_Close_5D",
+            "Dollar_Change_5D",
             "Forward_Return_5D",
             "Compression_Percentile",
             "CLV_Trend",
@@ -479,11 +486,14 @@ def render_profile(profile):
         plt.close(fig)
 
         if not analogs.empty:
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
             c1.metric("Analog count", len(analogs))
             c2.metric("Avg 5D return", f"{analogs['Forward_Return_5D'].mean():+.2f}%")
             c3.metric("Median 5D return", f"{analogs['Forward_Return_5D'].median():+.2f}%")
             c4.metric("Win rate", f"{(analogs['Forward_Return_5D'] > 0).mean() * 100:.1f}%")
+            c5.metric("Avg $ change", money0(analogs['Dollar_Change_5D'].mean()))
+            c6.metric("Min $ change", money0(analogs['Dollar_Change_5D'].min()))
+            c7.metric("Max $ change", money0(analogs['Dollar_Change_5D'].max()))
 
             st.dataframe(analogs, use_container_width=True, hide_index=True)
             st.download_button(
@@ -519,6 +529,9 @@ def compare_profiles_table(profiles: List[dict]) -> pd.DataFrame:
                 "Avg 5D return": "N/A" if analogs.empty else f"{analogs['Forward_Return_5D'].mean():+.2f}%",
                 "Median 5D return": "N/A" if analogs.empty else f"{analogs['Forward_Return_5D'].median():+.2f}%",
                 "Win rate": "N/A" if analogs.empty else f"{(analogs['Forward_Return_5D'] > 0).mean() * 100:.1f}%",
+                "Avg $ change": "N/A" if analogs.empty else money0(analogs['Dollar_Change_5D'].mean()),
+                "Min $ change": "N/A" if analogs.empty else money0(analogs['Dollar_Change_5D'].min()),
+                "Max $ change": "N/A" if analogs.empty else money0(analogs['Dollar_Change_5D'].max()),
             }
         )
     return pd.DataFrame(rows)
@@ -545,15 +558,26 @@ def main():
         period = st.selectbox("History", ["2y", "5y", "10y", "max"], index=1)
 
         st.header("Similarity matching")
+        st.caption("Compression percentile is always matched. Turn on extra filters to narrow the historical analogs.")
         compression_tolerance_pp = st.slider("Compression percentile tolerance (+/- points)", 1, 25, 5, 1)
-        selected_filters = st.multiselect(
-            "Optional filters to also match",
-            ["CLV trend", "Volume support", "Relative strength"],
-            default=[],
-        )
-        clv_tolerance = st.slider("CLV trend tolerance", 0.01, 0.50, 0.10, 0.01)
-        volume_tolerance_pct = st.slider("Volume ratio tolerance (+/- %)", 5, 100, 25, 5)
-        rs_tolerance_pp = st.slider("Relative strength tolerance (+/- percentage points)", 1, 30, 5, 1)
+
+        st.markdown("**Additional matching filters**")
+        use_clv = st.toggle("Match CLV trend", value=False)
+        clv_tolerance = st.slider("CLV trend tolerance", 0.01, 0.50, 0.10, 0.01, disabled=not use_clv)
+
+        use_volume = st.toggle("Match volume support", value=False)
+        volume_tolerance_pct = st.slider("Volume ratio tolerance (+/- %)", 5, 100, 25, 5, disabled=not use_volume)
+
+        use_rs = st.toggle("Match relative strength", value=False)
+        rs_tolerance_pp = st.slider("Relative strength tolerance (+/- percentage points)", 1, 30, 5, 1, disabled=not use_rs)
+
+        selected_filters = []
+        if use_clv:
+            selected_filters.append("CLV trend")
+        if use_volume:
+            selected_filters.append("Volume support")
+        if use_rs:
+            selected_filters.append("Relative strength")
 
         run_button = st.button("Run profile", type="primary")
 
@@ -590,6 +614,14 @@ def main():
                     )
 
         st.subheader("Side-by-side setup comparison")
+        criteria = [f"Compression percentile ±{compression_tolerance_pp} pts"]
+        if use_clv:
+            criteria.append(f"CLV trend ±{clv_tolerance:.2f}")
+        if use_volume:
+            criteria.append(f"Volume ratio ±{volume_tolerance_pct}%")
+        if use_rs:
+            criteria.append(f"Relative strength ±{rs_tolerance_pp} pts")
+        st.caption("Matched on: " + "; ".join(criteria))
         compare_df = compare_profiles_table(profiles)
         st.dataframe(compare_df, use_container_width=True, hide_index=True)
         st.download_button(
