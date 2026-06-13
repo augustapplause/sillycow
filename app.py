@@ -10,29 +10,23 @@ import yfinance as yf
 
 def money0(x):
     if x is None or pd.isna(x):
-        return "Not available"
+        return "N/A"
     x = float(x)
-    if x < 0:
-        return f"-${abs(x):,.0f}"
-    return f"${x:,.0f}"
+    return f"-${abs(x):,.0f}" if x < 0 else f"${x:,.0f}"
 
 
 def money2(x):
     if x is None or pd.isna(x):
         return "N/A"
     x = float(x)
-    if x < 0:
-        return f"-${abs(x):,.2f}"
-    return f"${x:,.2f}"
+    return f"-${abs(x):,.2f}" if x < 0 else f"${x:,.2f}"
 
 
 def signed_money0(x):
     if x is None or pd.isna(x):
         return "N/A"
     x = float(x)
-    if x < 0:
-        return f"-${abs(x):,.0f}"
-    return f"${x:,.0f}"
+    return f"-${abs(x):,.0f}" if x < 0 else f"${x:,.0f}"
 
 
 def pct1(x):
@@ -120,6 +114,7 @@ def rolling_percentile_rank(series: pd.Series, window: int) -> pd.Series:
 
 def add_profile_columns(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     df = df.copy()
+
     df["CLV"] = clv(df)
     df["CLV_5"] = df["CLV"].rolling(5).mean()
     df["CLV_20"] = df["CLV"].rolling(20).mean()
@@ -141,8 +136,14 @@ def add_profile_columns(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] =
             benchmark_df[["Close"]].rename(columns={"Close": "Benchmark_Close"}),
             how="left",
         )
-        df["RS_60"] = (aligned["Stock_Close"].pct_change(60) - aligned["Benchmark_Close"].pct_change(60)) * 100
-        df["RS_20"] = (aligned["Stock_Close"].pct_change(20) - aligned["Benchmark_Close"].pct_change(20)) * 100
+        df["RS_60"] = (
+            aligned["Stock_Close"].pct_change(60)
+            - aligned["Benchmark_Close"].pct_change(60)
+        ) * 100
+        df["RS_20"] = (
+            aligned["Stock_Close"].pct_change(20)
+            - aligned["Benchmark_Close"].pct_change(20)
+        ) * 100
     else:
         df["RS_60"] = np.nan
         df["RS_20"] = np.nan
@@ -150,7 +151,7 @@ def add_profile_columns(df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] =
     return df
 
 
-def compute_hvns(df, bins=140, top_nodes=10, decay_days=180):
+def compute_hvns(df, bins=140, top_nodes=10, decay_days=180, min_volume_percentile=85):
     if df.empty:
         return []
 
@@ -174,17 +175,23 @@ def compute_hvns(df, bins=140, top_nodes=10, decay_days=180):
 
         age_days = max((latest_date - date).days, 0)
         weighted_volume = volume * np.exp(-age_days / decay_days)
-        touched_bins = np.where((bin_edges[:-1] <= high) & (bin_edges[1:] >= low))[0]
 
+        touched_bins = np.where((bin_edges[:-1] <= high) & (bin_edges[1:] >= low))[0]
         if len(touched_bins) == 0:
             continue
 
         volume_profile[touched_bins] += weighted_volume / len(touched_bins)
         touch_counts[touched_bins] += 1
 
+    percentile_cutoff = np.percentile(volume_profile, min_volume_percentile)
+
     peaks = []
     for i in range(1, len(volume_profile) - 1):
-        if volume_profile[i] > volume_profile[i - 1] and volume_profile[i] > volume_profile[i + 1]:
+        if (
+            volume_profile[i] >= percentile_cutoff
+            and volume_profile[i] > volume_profile[i - 1]
+            and volume_profile[i] > volume_profile[i + 1]
+        ):
             peaks.append(i)
 
     if not peaks:
@@ -235,7 +242,9 @@ def scan_similar_setups(
     current = clean.iloc[-1]
     candidates = clean[clean.index < clean.index[-1]].copy()
 
-    mask = (candidates["Compression_Percentile"] - current["Compression_Percentile"]).abs() <= compression_tolerance_pp
+    mask = (
+        candidates["Compression_Percentile"] - current["Compression_Percentile"]
+    ).abs() <= compression_tolerance_pp
 
     if "CLV trend" in selected_filters:
         mask &= (candidates["CLV_Trend"] - current["CLV_Trend"]).abs() <= clv_tolerance
@@ -264,6 +273,7 @@ def scan_similar_setups(
     out["Forward_Return_5D"] = out["Forward_Return_5D"].round(2)
     out["Compression_Percentile"] = out["Compression_Percentile"].round(1)
     out["CLV_Trend"] = out["CLV_Trend"].round(2)
+    out["Volume_Ratio"] = out["Volume_Ratio"].round(2)
     out["RS_20"] = out["RS_20"].round(1)
 
     return out[
@@ -289,8 +299,6 @@ def build_profile(
     clv_tolerance: float,
     volume_tolerance_pct: float,
     rs_tolerance_pp: float,
-    hvn_count: int,
-    hvn_decay_days: int,
 ):
     raw = download_ohlcv(ticker, period)
     if raw.empty:
@@ -304,7 +312,6 @@ def build_profile(
     return {
         "ticker": ticker.upper(),
         "df": df,
-        "hvns": compute_hvns(df.tail(504), top_nodes=hvn_count, decay_days=hvn_decay_days),
         "analogs": scan_similar_setups(
             df,
             compression_tolerance_pp,
@@ -342,9 +349,6 @@ def inject_custom_css():
         }
         div[data-testid="stTabs"] button[aria-selected="true"] {
             border-bottom: 2px solid red;
-        }
-        div[data-testid="stTabs"] div[role="tabpanel"] {
-            padding-top: 0.25rem;
         }
         .mock-card {
             border: 1px solid #dfe5ef;
@@ -424,7 +428,16 @@ def inject_custom_css():
     )
 
 
-def build_analog_chart(profile):
+def get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile):
+    return compute_hvns(
+        profile["df"].tail(504),
+        top_nodes=hvn_count,
+        decay_days=hvn_decay_days,
+        min_volume_percentile=min_volume_percentile,
+    )
+
+
+def build_analog_chart(profile, hvns):
     analogs = profile["analogs"]
     ticker = profile["ticker"]
     latest_close = float(profile["df"].iloc[-1]["Close"])
@@ -443,24 +456,22 @@ def build_analog_chart(profile):
     ax.plot(chart_df["Date"], chart_df["Future_Close_5D"], linewidth=1.1, alpha=0.65)
     ax.scatter(chart_df["Date"], chart_df["Future_Close_5D"], s=70, label="Close 5 trading days later", zorder=3)
 
-    best_idx = chart_df["Dollar_Change_5D"].idxmax()
-    worst_idx = chart_df["Dollar_Change_5D"].idxmin()
-    best = chart_df.loc[best_idx]
-    worst = chart_df.loc[worst_idx]
+    best = chart_df.loc[chart_df["Dollar_Change_5D"].idxmax()]
+    worst = chart_df.loc[chart_df["Dollar_Change_5D"].idxmin()]
+
     ax.scatter([pd.to_datetime(best["Date"])], [best["Future_Close_5D"]], s=160, color="green", label="Biggest advance", zorder=4)
     ax.scatter([pd.to_datetime(worst["Date"])], [worst["Future_Close_5D"]], s=160, color="red", label="Biggest decline", zorder=4)
 
     ax.axhline(latest_close, linestyle="--", linewidth=1.4, color="#2166ff", label=f"Current close {money0(latest_close)}")
     ax.text(chart_df["Date"].max(), latest_close + 1, f"Current close {money0(latest_close)}", color="#2166ff", ha="right", va="bottom", fontsize=10, fontweight="bold")
 
-    top_hvns = profile["hvns"][:3]
-    for h in top_hvns:
+    for h in hvns[:3]:
         ax.axhline(h["price"], linestyle="--", linewidth=1.2, color="green", alpha=0.85)
         ax.text(chart_df["Date"].max(), h["price"], money2(h["price"]), color="green", ha="left", va="center", fontsize=10, fontweight="bold")
 
     ax.plot([], [], linestyle="--", color="green", label="Top 3 HVNs")
 
-    ax.set_title(f"{ticker} (Apple Inc.) : Historical Similar Compression Setups — Price 5 Days Later", fontsize=13, fontweight="bold", pad=14)
+    ax.set_title(f"{ticker}: Historical Similar Compression Setups — Price 5 Days Later", fontsize=13, fontweight="bold", pad=14)
     ax.set_xlabel("Analog Date", fontsize=12, fontweight="bold")
     ax.set_ylabel("Share Price 5 Days Later", fontsize=12, fontweight="bold")
     ax.grid(True, alpha=0.24)
@@ -482,6 +493,7 @@ def render_summary_metrics(profile):
         avg_change = analogs["Dollar_Change_5D"].mean()
         min_change = analogs["Dollar_Change_5D"].min()
         max_change = analogs["Dollar_Change_5D"].max()
+
         values = [
             f"{len(analogs)}",
             signed_pct1(avg_ret),
@@ -490,59 +502,71 @@ def render_summary_metrics(profile):
             signed_money0(avg_change),
             f"{signed_money0(min_change)} to {signed_money0(max_change)}",
         ]
-        classes = ["", "green" if avg_ret > 0 else "red", "green" if med_ret > 0 else "red", "", "green" if avg_change > 0 else "red", ""]
+        classes = [
+            "",
+            "green" if avg_ret > 0 else "red",
+            "green" if med_ret > 0 else "red",
+            "",
+            "green" if avg_change > 0 else "red",
+            "",
+        ]
 
     labels = ["Analog count", "Avg 5D return", "Median 5D return", "Win rate", "Avg $ change", "Change Range"]
 
-    boxes = "".join(
+    boxes = []
+    for label, value, css_class in zip(labels, values, classes):
+        boxes.append(
+            f"""
+            <div class="metric-box">
+                <div class="metric-label">{html.escape(label)}</div>
+                <div class="metric-value {css_class}">{html.escape(value)}</div>
+            </div>
+            """
+        )
+
+    st.markdown(
         f"""
-        <div class="metric-box">
-            <div class="metric-label">{html.escape(labels[i])}</div>
-            <div class="metric-value {classes[i]}">{html.escape(values[i])}</div>
+        <div class="mock-card">
+            <div class="metric-grid">
+                {''.join(boxes)}
+            </div>
         </div>
-        """
-        for i in range(6)
+        """,
+        unsafe_allow_html=True,
     )
 
-    st.markdown(f'<div class="mock-card"><div class="metric-grid">{boxes}</div></div>', unsafe_allow_html=True)
 
-
-def build_distribution_chart(profile, bins_count=12):
+def build_distribution_chart(profile, bins_count):
     analogs = profile["analogs"]
     fig, ax = plt.subplots(figsize=(8.4, 5.0))
 
-    labels = ["≥ $20", "$15 to $20", "$10 to $15", "$5 to $10", "$0 to $5", "-$5 to $0", "-$10 to -$5", "-$15 to -$10", "-$20 to -$15", "≤ -$20"]
-
     if analogs.empty:
-        counts = [0] * len(labels)
-    else:
-        s = analogs["Dollar_Change_5D"]
-        counts = [
-            int((s >= 20).sum()),
-            int(((s >= 15) & (s < 20)).sum()),
-            int(((s >= 10) & (s < 15)).sum()),
-            int(((s >= 5) & (s < 10)).sum()),
-            int(((s >= 0) & (s < 5)).sum()),
-            int(((s >= -5) & (s < 0)).sum()),
-            int(((s >= -10) & (s < -5)).sum()),
-            int(((s >= -15) & (s < -10)).sum()),
-            int(((s >= -20) & (s < -15)).sum()),
-            int((s < -20).sum()),
-        ]
+        ax.text(0.5, 0.5, "No distribution available", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return fig
+
+    s = analogs["Dollar_Change_5D"].astype(float)
+    counts, edges = np.histogram(s, bins=bins_count)
+
+    labels = []
+    for i in range(len(edges) - 1):
+        lo = edges[i]
+        hi = edges[i + 1]
+        labels.append(f"${lo:,.0f} to ${hi:,.0f}")
 
     y = np.arange(len(labels))
     ax.barh(y, counts, color="#0d5bd6")
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=10)
+    ax.set_yticklabels(labels, fontsize=9)
     ax.invert_yaxis()
     ax.set_xlabel("Count", fontsize=12, fontweight="bold")
     ax.set_ylabel("Dollar Change (5D)", fontsize=12, fontweight="bold")
     ax.grid(axis="x", alpha=0.22)
 
     for i, count in enumerate(counts):
-        ax.text(count + 0.2, i, str(count), va="center", fontsize=10, fontweight="bold")
+        ax.text(count + 0.15, i, str(int(count)), va="center", fontsize=9, fontweight="bold")
 
-    ax.set_xlim(0, max(max(counts) + 4, 10))
+    ax.set_xlim(0, max(int(counts.max()) + 3, 5))
     fig.tight_layout()
     return fig
 
@@ -553,38 +577,36 @@ def render_distribution(profile):
     negatives = int((analogs["Dollar_Change_5D"] <= 0).sum()) if not analogs.empty else 0
     total = max(len(analogs), 1)
 
-    st.markdown('<div class="mock-card">', unsafe_allow_html=True)
-    top_left, top_right = st.columns([3, 2])
-    with top_left:
+    with st.container():
         st.markdown('<div class="section-title">Distribution of 5-Day Dollar Change ⓘ</div>', unsafe_allow_html=True)
-    with top_right:
-        st.slider("Number of bins", 6, 24, 12, 1)
 
-    c1, c2 = st.columns([3.4, 1.25])
-    with c1:
-        fig = build_distribution_chart(profile)
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+        top_left, top_right = st.columns([3, 2])
+        with top_right:
+            bins_count = st.slider("Number of bins", 6, 24, 12, 1, key="distribution_bins")
 
-    with c2:
-        st.markdown(
-            f"""
-            <div class="outcome-card">
-                <div class="outcome-title">Positive outcomes</div>
-                <div class="outcome-number green">{positives} ({positives / total * 100:.1f}%)</div>
-                <div class="divider"></div>
-                <div class="outcome-title">Negative outcomes</div>
-                <div class="outcome-number red">{negatives} ({negatives / total * 100:.1f}%)</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        c1, c2 = st.columns([3.4, 1.25])
+        with c1:
+            fig = build_distribution_chart(profile, bins_count)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown(
+                f"""
+                <div class="outcome-card">
+                    <div class="outcome-title">Positive outcomes</div>
+                    <div class="outcome-number green">{positives} ({positives / total * 100:.1f}%)</div>
+                    <div class="divider"></div>
+                    <div class="outcome-title">Negative outcomes</div>
+                    <div class="outcome-number red">{negatives} ({negatives / total * 100:.1f}%)</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def render_analogs_table(profile):
-    analogs = profile["analogs"].head(10).copy()
+    analogs = profile["analogs"].copy()
     if analogs.empty:
         st.info("No similar historical setup was found with the current filters.")
         return
@@ -604,8 +626,9 @@ def render_analogs_table(profile):
         subset=["Dollar_Change_5D", "Forward_Return_5D"],
     )
 
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=310)
-    st.caption(f"Showing 1 to {min(10, len(profile['analogs']))} of {len(profile['analogs'])} entries")
+    height = min(800, max(340, 38 * (len(analogs) + 1)))
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=height)
+    st.caption(f"Showing all {len(analogs)} entries")
 
 
 def render_hvn_section(profile):
@@ -614,15 +637,23 @@ def render_hvn_section(profile):
     left, right = st.columns([1.05, 2.55])
 
     with left:
-        st.markdown('<div class="mock-card">', unsafe_allow_html=True)
-        st.selectbox("HVN Selection", ["Top 10 by Volume", "Top 5 by Volume", "Top 20 by Volume"], index=0)
-        st.slider("Minimum Volume Percentile", 50, 99, 85, 1)
-        st.slider("Node Decay (Days)", 30, 365, 180, 1)
-        st.info("Node decay reduces the influence of older price activity. Lower values focus on recent data; higher values include more historical data.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        hvn_selection = st.selectbox(
+            "HVN Selection",
+            ["Top 5 by Volume", "Top 10 by Volume", "Top 20 by Volume"],
+            index=1,
+        )
+        hvn_count = int(hvn_selection.split()[1])
+        min_volume_percentile = st.slider("Minimum Volume Percentile", 50, 99, 85, 1)
+        hvn_decay_days = st.slider("Node Decay (Days)", 30, 365, 180, 1)
+        st.info(
+            "Node decay reduces the influence of older price activity. Lower values focus on recent data; "
+            "higher values include more historical data."
+        )
+
+    hvns = get_active_hvns(profile, hvn_count, hvn_decay_days, min_volume_percentile)
 
     with right:
-        hvn_table = pd.DataFrame(profile["hvns"])
+        hvn_table = pd.DataFrame(hvns)
         if hvn_table.empty:
             st.info("No HVNs were found.")
             return
@@ -654,10 +685,10 @@ def render_hvn_section(profile):
 
 
 def render_profile(profile):
-    fig = build_analog_chart(profile)
-    st.markdown('<div class="mock-card">', unsafe_allow_html=True)
+    preview_hvns = get_active_hvns(profile, 10, 180, 85)
+
+    fig = build_analog_chart(profile, preview_hvns)
     st.pyplot(fig, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
     plt.close(fig)
 
     render_summary_metrics(profile)
@@ -673,23 +704,26 @@ def main():
     st.title("Stock Setup Profiler")
     st.caption("Find historical matches and outcomes for current market conditions")
 
-    with st.expander("Controls", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        ticker = c1.text_input("Ticker", value="AAPL").strip().upper()
-        benchmark = c2.text_input("Benchmark", value="SPY").strip().upper()
-        period = c3.selectbox("History", ["2y", "5y", "10y", "max"], index=1)
-        compression_tolerance_pp = c4.slider("Compression tolerance", 1, 25, 5, 1)
+    with st.sidebar:
+        st.header("Inputs")
+        ticker = st.text_input("Ticker", value="AAPL").strip().upper()
+        benchmark = st.text_input("Benchmark", value="SPY").strip().upper()
+        period = st.selectbox("History", ["2y", "5y", "10y", "max"], index=1)
 
-        c5, c6, c7, c8 = st.columns(4)
-        use_clv = c5.toggle("Match CLV trend", value=False)
-        clv_tolerance = c6.slider("CLV tolerance", 0.01, 0.50, 0.10, 0.01)
-        use_rs = c7.toggle("Match relative strength", value=False)
-        rs_tolerance_pp = c8.slider("RS tolerance", 1, 30, 5, 1)
+        st.header("Similarity matching")
+        compression_tolerance_pp = st.slider("Compression percentile tolerance (+/- points)", 1, 25, 5, 1)
 
-        c9, c10, c11 = st.columns(3)
-        use_volume = c9.toggle("Match volume support", value=False)
-        volume_tolerance_pct = c10.slider("Volume tolerance", 5, 100, 25, 5)
-        hvn_decay_days = c11.slider("Default HVN decay", 30, 365, 180, 1)
+        st.markdown("**Additional matching filters**")
+        use_clv = st.toggle("Match CLV trend", value=False)
+        clv_tolerance = st.slider("CLV trend tolerance", 0.01, 0.50, 0.10, 0.01, disabled=not use_clv)
+
+        use_volume = st.toggle("Match volume support", value=False)
+        volume_tolerance_pct = st.slider("Volume ratio tolerance (+/- %)", 5, 100, 25, 5, disabled=not use_volume)
+
+        use_rs = st.toggle("Match relative strength", value=False)
+        rs_tolerance_pp = st.slider("Relative strength tolerance (+/- percentage points)", 1, 30, 5, 1, disabled=not use_rs)
+
+        run_button = st.button("Run profile", type="primary")
 
     selected_filters = []
     if use_clv:
@@ -699,28 +733,30 @@ def main():
     if use_rs:
         selected_filters.append("Relative strength")
 
-    try:
-        with st.spinner("Building profile..."):
-            benchmark_df = download_ohlcv(benchmark, period)
-            profile = build_profile(
-                ticker=ticker,
-                benchmark_df=benchmark_df,
-                period=period,
-                compression_tolerance_pp=compression_tolerance_pp,
-                selected_filters=selected_filters,
-                clv_tolerance=clv_tolerance,
-                volume_tolerance_pct=volume_tolerance_pct,
-                rs_tolerance_pp=rs_tolerance_pp,
-                hvn_count=10,
-                hvn_decay_days=hvn_decay_days,
-            )
+    if not run_button and "profile" not in st.session_state:
+        run_button = True
 
-        tab1, = st.tabs(["Similar setup outcomes"])
-        with tab1:
-            render_profile(profile)
+    if run_button:
+        try:
+            with st.spinner("Building profile..."):
+                benchmark_df = download_ohlcv(benchmark, period)
+                st.session_state["profile"] = build_profile(
+                    ticker=ticker,
+                    benchmark_df=benchmark_df,
+                    period=period,
+                    compression_tolerance_pp=compression_tolerance_pp,
+                    selected_filters=selected_filters,
+                    clv_tolerance=clv_tolerance,
+                    volume_tolerance_pct=volume_tolerance_pct,
+                    rs_tolerance_pp=rs_tolerance_pp,
+                )
+        except Exception as e:
+            st.error(str(e))
+            return
 
-    except Exception as e:
-        st.error(str(e))
+    tab1, = st.tabs(["Similar setup outcomes"])
+    with tab1:
+        render_profile(st.session_state["profile"])
 
 
 if __name__ == "__main__":
