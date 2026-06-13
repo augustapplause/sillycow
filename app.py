@@ -479,8 +479,8 @@ def build_analog_chart(profile, hvns):
     title_name = f"{ticker} ({stock_name})" if stock_name and stock_name.upper() != ticker.upper() else ticker
     latest_close = float(profile["df"].iloc[-1]["Close"])
 
-    fig = plt.figure(figsize=(16.4, 5.8))
-    grid = fig.add_gridspec(1, 2, width_ratios=[1.85, 8.15], wspace=0.08)
+    fig = plt.figure(figsize=(18.0, 5.8))
+    grid = fig.add_gridspec(1, 2, width_ratios=[3.25, 6.75], wspace=0.22)
     legend_ax = fig.add_subplot(grid[0, 0])
     ax = fig.add_subplot(grid[0, 1])
     legend_ax.set_axis_off()
@@ -648,14 +648,14 @@ def build_analog_chart(profile, hvns):
         labels,
         loc="center left",
         frameon=True,
-        fontsize=13,
+        fontsize=12,
         ncol=1,
         borderaxespad=0.0,
         labelspacing=1.05,
-        handlelength=2.4,
-        handletextpad=0.75,
+        handlelength=2.0,
+        handletextpad=0.65,
     )
-    fig.subplots_adjust(left=0.015, right=0.99, top=0.89, bottom=0.17, wspace=0.08)
+    fig.subplots_adjust(left=0.02, right=0.985, top=0.89, bottom=0.17, wspace=0.22)
     return fig
 
 def color_class_for_number(value) -> str:
