@@ -2,6 +2,7 @@ import html
 from typing import List, Optional
 
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator, StrMethodFormatter
 import numpy as np
 import pandas as pd
@@ -533,7 +534,12 @@ def build_analog_chart(profile, hvns):
         min_y = min(min_y, h["price"])
         max_y = max(max_y, h["price"])
     price_span = max(max_y - min_y, 1)
-    label_offset = price_span * 0.03
+
+    min_date = chart_df["Date"].min()
+    max_date = chart_df["Date"].max()
+    date_span_days = max((max_date - min_date).days, 30)
+    x_padding_days = max(int(date_span_days * 0.035), 10)
+    label_x = max_date + pd.Timedelta(days=x_padding_days)
 
     ax.axhline(
         latest_close,
@@ -548,8 +554,9 @@ def build_analog_chart(profile, hvns):
             "y": latest_close,
             "text": f"Current close {money0(latest_close)}",
             "color": "#2166ff",
-            "ha": "right",
-            "x": chart_df["Date"].max(),
+            "ha": "left",
+            "x": label_x,
+            "anchor_x": max_date,
         }
     ]
 
@@ -561,7 +568,8 @@ def build_analog_chart(profile, hvns):
                 "text": money2(h["price"]),
                 "color": "green",
                 "ha": "left",
-                "x": chart_df["Date"].max(),
+                "x": label_x,
+                "anchor_x": max_date,
             }
         )
 
@@ -596,7 +604,7 @@ def build_analog_chart(profile, hvns):
             }
         ax.annotate(
             item["text"],
-            xy=(item["x"], item["y"]),
+            xy=(item.get("anchor_x", item["x"]), item["y"]),
             xytext=(item["x"], display_y),
             textcoords="data",
             color=item["color"],
@@ -606,6 +614,7 @@ def build_analog_chart(profile, hvns):
             fontweight="bold",
             arrowprops=arrowprops,
             zorder=5,
+            clip_on=False,
         )
 
     if hvns:
@@ -625,9 +634,19 @@ def build_analog_chart(profile, hvns):
     ax.set_xlabel("Analog Date", fontsize=21, fontweight="bold")
     ax.set_ylabel("Share Price 5 Days Later", fontsize=21, fontweight="bold")
     ax.tick_params(axis="both", labelsize=18)
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.set_xlim(min_date - pd.Timedelta(days=x_padding_days), label_x + pd.Timedelta(days=x_padding_days))
     ax.grid(True, alpha=0.24)
-    ax.legend(loc="lower right", frameon=True, fontsize=14)
-    fig.tight_layout()
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.20),
+        frameon=True,
+        fontsize=14,
+        ncol=2,
+        borderaxespad=0.0,
+    )
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     return fig
 
 def color_class_for_number(value) -> str:
