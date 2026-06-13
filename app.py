@@ -29,12 +29,6 @@ def signed_money0(x):
     return f"-${abs(x):,.0f}" if x < 0 else f"${x:,.0f}"
 
 
-def pct1(x):
-    if x is None or pd.isna(x):
-        return "N/A"
-    return f"{x:.1f}%"
-
-
 def signed_pct1(x):
     if x is None or pd.isna(x):
         return "N/A"
@@ -350,40 +344,6 @@ def inject_custom_css():
         div[data-testid="stTabs"] button[aria-selected="true"] {
             border-bottom: 2px solid red;
         }
-        .mock-card {
-            border: 1px solid #dfe5ef;
-            border-radius: 10px;
-            background: white;
-            padding: 16px 18px;
-            box-shadow: 0 1px 2px rgba(20, 30, 60, 0.03);
-            margin-bottom: 14px;
-        }
-        .metric-grid {
-            display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
-            gap: 0;
-            text-align: center;
-        }
-        .metric-box {
-            border-right: 1px solid #e7ebf3;
-            min-height: 78px;
-            padding: 5px 10px;
-        }
-        .metric-box:last-child {
-            border-right: 0;
-        }
-        .metric-label {
-            color: #0f1730;
-            font-size: 0.83rem;
-            font-weight: 750;
-            margin-bottom: 10px;
-        }
-        .metric-value {
-            color: #061027;
-            font-size: 1.92rem;
-            font-weight: 850;
-            line-height: 1.1;
-        }
         .red {
             color: red !important;
         }
@@ -393,23 +353,23 @@ def inject_custom_css():
         .outcome-card {
             border: 1px solid #dfe5ef;
             border-radius: 10px;
-            padding: 28px 24px;
+            padding: 14px 12px;
             text-align: center;
-            min-height: 238px;
+            min-height: 120px;
         }
         .outcome-title {
             color: #0f1730;
-            font-size: 1.14rem;
-            margin-bottom: 10px;
+            font-size: 0.62rem;
+            margin-bottom: 6px;
         }
         .outcome-number {
-            font-size: 1.75rem;
+            font-size: 0.88rem;
             font-weight: 850;
-            margin-bottom: 28px;
+            margin-bottom: 14px;
         }
         .divider {
             border-top: 1px solid #d5dbe7;
-            margin: 6px 0 24px;
+            margin: 4px 0 12px;
         }
         .section-title {
             color: #111936;
@@ -421,6 +381,20 @@ def inject_custom_css():
             border: 1px solid #dfe5ef;
             border-radius: 8px;
             overflow: hidden;
+        }
+        div[data-testid="stMetric"] {
+            border: 1px solid #dfe5ef;
+            border-radius: 10px;
+            padding: 12px 12px;
+            background: white;
+        }
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.82rem;
+            font-weight: 800;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.65rem;
+            font-weight: 850;
         }
         </style>
         """,
@@ -485,7 +459,6 @@ def render_summary_metrics(profile):
 
     if analogs.empty:
         values = ["0", "N/A", "N/A", "N/A", "N/A", "N/A"]
-        classes = ["", "", "", "", "", ""]
     else:
         avg_ret = analogs["Forward_Return_5D"].mean()
         med_ret = analogs["Forward_Return_5D"].median()
@@ -502,38 +475,20 @@ def render_summary_metrics(profile):
             signed_money0(avg_change),
             f"{signed_money0(min_change)} to {signed_money0(max_change)}",
         ]
-        classes = [
-            "",
-            "green" if avg_ret > 0 else "red",
-            "green" if med_ret > 0 else "red",
-            "",
-            "green" if avg_change > 0 else "red",
-            "",
-        ]
 
-    labels = ["Analog count", "Avg 5D return", "Median 5D return", "Win rate", "Avg $ change", "Change Range"]
+    labels = [
+        "Analog count",
+        "Avg 5D return",
+        "Median 5D return",
+        "Win rate",
+        "Avg $ change",
+        "Change Range",
+    ]
 
-    boxes = []
-    for label, value, css_class in zip(labels, values, classes):
-        boxes.append(
-            f"""
-            <div class="metric-box">
-                <div class="metric-label">{html.escape(label)}</div>
-                <div class="metric-value {css_class}">{html.escape(value)}</div>
-            </div>
-            """
-        )
-
-    st.markdown(
-        f"""
-        <div class="mock-card">
-            <div class="metric-grid">
-                {''.join(boxes)}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    cols = st.columns(6)
+    for col, label, value in zip(cols, labels, values):
+        with col:
+            st.metric(label, value)
 
 
 def build_distribution_chart(profile, bins_count):
@@ -541,7 +496,15 @@ def build_distribution_chart(profile, bins_count):
     fig, ax = plt.subplots(figsize=(8.4, 5.0))
 
     if analogs.empty:
-        ax.text(0.5, 0.5, "No distribution available", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No distribution available",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=24,
+        )
         ax.set_axis_off()
         return fig
 
@@ -557,14 +520,15 @@ def build_distribution_chart(profile, bins_count):
     y = np.arange(len(labels))
     ax.barh(y, counts, color="#0d5bd6")
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_yticklabels(labels, fontsize=27)
     ax.invert_yaxis()
-    ax.set_xlabel("Count", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Dollar Change (5D)", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Count", fontsize=30, fontweight="bold")
+    ax.set_ylabel("Dollar Change (5D)", fontsize=30, fontweight="bold")
+    ax.tick_params(axis="x", labelsize=24)
     ax.grid(axis="x", alpha=0.22)
 
     for i, count in enumerate(counts):
-        ax.text(count + 0.15, i, str(int(count)), va="center", fontsize=9, fontweight="bold")
+        ax.text(count + 0.15, i, str(int(count)), va="center", fontsize=24, fontweight="bold")
 
     ax.set_xlim(0, max(int(counts.max()) + 3, 5))
     fig.tight_layout()
@@ -577,32 +541,31 @@ def render_distribution(profile):
     negatives = int((analogs["Dollar_Change_5D"] <= 0).sum()) if not analogs.empty else 0
     total = max(len(analogs), 1)
 
-    with st.container():
-        st.markdown('<div class="section-title">Distribution of 5-Day Dollar Change ⓘ</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Distribution of 5-Day Dollar Change ⓘ</div>', unsafe_allow_html=True)
 
-        top_left, top_right = st.columns([3, 2])
-        with top_right:
-            bins_count = st.slider("Number of bins", 6, 24, 12, 1, key="distribution_bins")
+    top_left, top_right = st.columns([3, 2])
+    with top_right:
+        bins_count = st.slider("Number of bins", 6, 24, 12, 1, key="distribution_bins")
 
-        c1, c2 = st.columns([3.4, 1.25])
-        with c1:
-            fig = build_distribution_chart(profile, bins_count)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+    c1, c2 = st.columns([3.4, 1.25])
+    with c1:
+        fig = build_distribution_chart(profile, bins_count)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
 
-        with c2:
-            st.markdown(
-                f"""
-                <div class="outcome-card">
-                    <div class="outcome-title">Positive outcomes</div>
-                    <div class="outcome-number green">{positives} ({positives / total * 100:.1f}%)</div>
-                    <div class="divider"></div>
-                    <div class="outcome-title">Negative outcomes</div>
-                    <div class="outcome-number red">{negatives} ({negatives / total * 100:.1f}%)</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    with c2:
+        st.markdown(
+            f"""
+            <div class="outcome-card">
+                <div class="outcome-title">Positive outcomes</div>
+                <div class="outcome-number green">{positives} ({positives / total * 100:.1f}%)</div>
+                <div class="divider"></div>
+                <div class="outcome-title">Negative outcomes</div>
+                <div class="outcome-number red">{negatives} ({negatives / total * 100:.1f}%)</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_analogs_table(profile):
@@ -626,7 +589,7 @@ def render_analogs_table(profile):
         subset=["Dollar_Change_5D", "Forward_Return_5D"],
     )
 
-    height = min(800, max(340, 38 * (len(analogs) + 1)))
+    height = min(900, max(340, 38 * (len(analogs) + 1)))
     st.dataframe(styled, use_container_width=True, hide_index=True, height=height)
     st.caption(f"Showing all {len(analogs)} entries")
 
