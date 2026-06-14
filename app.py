@@ -182,6 +182,7 @@ def compute_hvns(df, bins=140, top_nodes=10, decay_days=180, min_volume_percenti
         return []
 
     bin_edges = np.linspace(min_price, max_price, bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     volume_profile = np.zeros(bins)
     touch_counts = np.zeros(bins)
     latest_date = df.index[-1]
@@ -189,9 +190,10 @@ def compute_hvns(df, bins=140, top_nodes=10, decay_days=180, min_volume_percenti
     for date, row in df.iterrows():
         low = float(row["Low"])
         high = float(row["High"])
+        close = float(row["Close"])
         volume = float(row["Volume"])
 
-        if high <= low or volume <= 0:
+        if high <= low or volume <= 0 or not np.isfinite(close):
             continue
 
         age_days = max((latest_date - date).days, 0)
@@ -201,10 +203,27 @@ def compute_hvns(df, bins=140, top_nodes=10, decay_days=180, min_volume_percenti
         if len(touched_bins) == 0:
             continue
 
-        volume_profile[touched_bins] += weighted_volume / len(touched_bins)
+        # Daily OHLCV does not contain true volume-at-price. Instead of spreading
+        # the day's volume evenly across the whole high-low range, bias it toward
+        # the close. This uses close location value behavior as a practical proxy:
+        # a close near the high concentrates more volume toward the upper range,
+        # while a close near the low concentrates more volume toward the lower range.
+        touched_centers = bin_centers[touched_bins]
+        day_range = max(high - low, 1e-9)
+        close_anchor = np.clip(close, low, high)
+        sigma = max(day_range * 0.28, (bin_edges[1] - bin_edges[0]) * 1.5)
+        distance_weights = np.exp(-0.5 * ((touched_centers - close_anchor) / sigma) ** 2)
+        base_weights = np.ones_like(distance_weights) * 0.20
+        allocation_weights = base_weights + distance_weights
+        allocation_weights = allocation_weights / (allocation_weights.sum() + 1e-9)
+
+        volume_profile[touched_bins] += weighted_volume * allocation_weights
         touch_counts[touched_bins] += 1
 
-    percentile_cutoff = np.percentile(volume_profile, min_volume_percentile)
+    active_profile = volume_profile[volume_profile > 0]
+    if len(active_profile) == 0:
+        return []
+    percentile_cutoff = np.percentile(active_profile, min_volume_percentile)
 
     peaks = []
     for i in range(1, len(volume_profile) - 1):
