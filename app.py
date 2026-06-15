@@ -1210,7 +1210,7 @@ def render_summary_metrics(profile, key_prefix="main"):
     }}
     .analog-summary-cell {{
         color: #2a2f3a;
-        font-weight: 900;
+        font-weight: 500;
         font-size: clamp(0.95rem, 1.35vw, 1.40rem);
         line-height: 1.05;
     }}
