@@ -1204,14 +1204,14 @@ def render_summary_metrics(profile, key_prefix="main"):
         background: #f7f8fb;
         color: #4f5663;
         font-weight: 700;
-        font-size: clamp(0.72rem, 1.02vw, 1.12rem);
+        font-size: clamp(0.90rem, 1.25vw, 1.30rem);
         line-height: 1.03;
         height: auto;
     }}
     .analog-summary-cell {{
         color: #2a2f3a;
         font-weight: 900;
-        font-size: clamp(0.78rem, 1.12vw, 1.18rem);
+        font-size: clamp(0.95rem, 1.35vw, 1.40rem);
         line-height: 1.05;
     }}
     .analog-summary-metric {{
