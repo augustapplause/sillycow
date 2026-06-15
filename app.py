@@ -802,7 +802,7 @@ def build_analog_chart(profile, hvns):
         loc="upper left",
         bbox_to_anchor=(0.0, 0.58),
         frameon=True,
-        fontsize=16,
+        fontsize=18,
         ncol=1,
         borderaxespad=0.0,
         labelspacing=1.15,
