@@ -666,7 +666,7 @@ def render_hmm_state_section(profile, key_prefix="main"):
         ac_styled = ac_pivot.style.format("{:.2f}%").map(
             lambda v: "font-weight: 850;" if isinstance(v, (int, float, np.number)) else ""
         )
-        st.markdown(f'<div class="section-title">{info_tooltip(f"Transition probabilities for current {latest_state} regime ({age_conditioned_label})", AGE_CONDITIONED_TOOLTIP)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-title">{info_tooltip(f"Transition probabilities - current {latest_state} regime ({age_conditioned_label})", AGE_CONDITIONED_TOOLTIP)}</div>', unsafe_allow_html=True)
         st.dataframe(ac_styled, use_container_width=True, height=90)
         st.caption("This is an empirical historical calculation, not a forecast. It reflects how similar-aged regimes behaved in the past.")
 
