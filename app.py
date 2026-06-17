@@ -1268,7 +1268,7 @@ def build_analog_chart(profile):
         pad=16,
     )
     ax.set_xlabel("Analog Date", fontsize=21, fontweight="bold")
-    ax.set_ylabel("Share Price 5 Days Later", fontsize=21, fontweight="bold")
+    ax.set_ylabel("Share Price", fontsize=21, fontweight="bold")
     ax.tick_params(axis="both", labelsize=18)
     ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
