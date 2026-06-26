@@ -2322,7 +2322,7 @@ def main():
         ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         comparison_ticker = st.text_input("Second ticker for comparison", value="MSFT").strip().upper()
         benchmark = st.text_input("Benchmark 1", value="SPY").strip().upper()
-        benchmark_2 = st.text_input("Benchmark 2", value="VGD").strip().upper()
+        benchmark_2 = st.text_input("Benchmark 2", value="VGT").strip().upper()
         benchmark_3 = st.text_input("Benchmark 3", value="SCHD").strip().upper()
         benchmark_4 = st.text_input("Benchmark 4", value="TLT").strip().upper()
         period = st.selectbox("History", ["2y", "5y", "10y", "max"], index=1)
